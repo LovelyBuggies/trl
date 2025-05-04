@@ -68,6 +68,8 @@ def reward_capitalization(completions, **kwargs):
     
     return rewards
 
+
+
 def main():
     # Parse command line arguments
     args = parse_arguments()
@@ -77,16 +79,11 @@ def main():
     if args.config:
         config = load_config(args.config)
     
-    # Command line arguments override config file settings
-    compression = args.compression or config.get('compression', 'high')
-    
     # Get other parameters from config
     use_wandb = config.get('use_wandb', False)
     wandb_project = config.get('wandb_project', 'language-model-training')
     wandb_entity = config.get('wandb_entity', None)
-    run_name = config.get('run_name', f'qwen-0.5b-grpo-{compression}-compression')
-    
-    print(f"Using {compression} compression level")
+    run_name = config.get('run_name', f'qwen-0.5b-grpo-tldr')
     if use_wandb:
         # Initialize wandb if enabled
         if wandb_entity:
@@ -98,23 +95,18 @@ def main():
         
         # Import and initialize wandb here if it's enabled
         if use_wandb:
-            try:
-                import wandb
-                wandb.init(
-                    project=wandb_project,
-                    entity=wandb_entity,
-                    name=run_name,
-                    config={
-                        "compression": compression,
-                        "model_name": config.get('model_name', "Qwen/Qwen2.5-0.5B"),
-                        "learning_rate": config.get('learning_rate', 5e-5),
-                        "epochs": config.get('num_train_epochs', 3),
-                        "batch_size": config.get('batch_size', 4),
-                    }
-                )
-            except ImportError:
-                print("Warning: wandb not installed. Running without Weights & Biases tracking.")
-                use_wandb = False
+            import wandb
+            wandb.init(
+                project=wandb_project,
+                entity=wandb_entity,
+                name=run_name,
+                config={
+                    "model_name": config.get('model_name', "Qwen/Qwen2.5-0.5B"),
+                    "learning_rate": config.get('learning_rate', 5e-5),
+                    "epochs": config.get('num_train_epochs', 3),
+                    "batch_size": config.get('batch_size', 4),
+                }
+            )
     
     # Load the dataset
     dataset_name = config.get('dataset', "trl-lib/tldr")
@@ -199,7 +191,7 @@ def main():
     trainer.train()
     
     # Save the fine-tuned model
-    output_dir = config.get('save_dir', f"qwen-0.5b-grpo-{compression}-compression")
+    output_dir = config.get('save_dir', f"qwen-0.5b-magrpo-tldr")
     trainer.save_model(output_dir)
     print(f"Model saved to {output_dir}")
 

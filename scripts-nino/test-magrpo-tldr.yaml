@@ -35,7 +35,7 @@ reward_weights: [0.3, 0.7]  # Weights for the reward functions (length, capitali
 
 # Output settings
 output_dir: "./results"
-save_dir: "qwen-0.5b-grpo-low-duel-rewards"
+save_dir: "qwen-0.5b-magrpo-tldr"
 logging_dir: "./logs"
 logging_steps: 10
 save_steps: 200
@@ -45,4 +45,4 @@ save_total_limit: 3
 use_wandb: true
 wandb_project: "trl"
 wandb_entity: "nu-llpr"  # Your Weights & Biases username or organization
-run_name: "qwen-0.5b-grpo-low-duel-rewards"
+run_name: "qwen-0.5b-magrpo-tldr"
