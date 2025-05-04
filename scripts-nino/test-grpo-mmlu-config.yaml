@@ -1,8 +1,4 @@
 # Model training configuration for GRPO
-
-# Compression settings
-compression: "low"  # Options: "high" (4-bit), "medium" (8-bit), or "low" (16-bit)
-
 # Model settings
 model_name: "Qwen/Qwen2.5-0.5B"
 target_modules: 
@@ -14,7 +10,8 @@ target_modules:
 # Dataset settings
 dataset: "tasksource/mmlu"
 mmlu_subset: "all" 
-mmlu_split: "dev" 
+mmlu_split: "dev"
+max_samples: 50
 
 # Training parameters
 batch_size: 2
@@ -34,14 +31,14 @@ top_k: 50
 
 # Output settings
 output_dir: "./results"
-save_dir: "qwen-0.5b-grpo-mmlu"
+save_dir: "qwen-0.5b-grpo-mmlu-correct"
 logging_dir: "./logs"
 logging_steps: 10
 save_steps: 100
 save_total_limit: 3
 
 # Weights & Biases integration
-use_wandb: true
+use_wandb: false
 wandb_project: "trl"
-wandb_entity: "nu-llpr"  # Your Weights & Biases username or organization
-run_name: "qwen-0.5b-grpo-mmlu"
+wandb_entity: "nu-llpr"
+run_name: "qwen-0.5b-grpo-mmlu-correct"
