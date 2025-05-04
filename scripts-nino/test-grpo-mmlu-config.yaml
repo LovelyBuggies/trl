@@ -1,7 +1,7 @@
-# Model training configuration for GRPO
+# Model training configuration for GRPO with WandB tracking
 # Model settings
 model_name: "Qwen/Qwen2.5-0.5B"
-target_modules: 
+target_modules:
   - "q_proj"
   - "k_proj"
   - "v_proj"
@@ -9,9 +9,13 @@ target_modules:
 
 # Dataset settings
 dataset: "tasksource/mmlu"
-mmlu_subset: "all" 
+mmlu_subset: "all"
 mmlu_split: "dev"
-max_samples: 50
+max_samples: 100
+# Add evaluation dataset settings
+eval_split: "test"
+eval_max_samples: 50
+eval_steps: 100
 
 # Training parameters
 batch_size: 2
@@ -31,14 +35,22 @@ top_k: 50
 
 # Output settings
 output_dir: "./results"
-save_dir: "qwen-0.5b-grpo-mmlu-correct"
+save_dir: "qwen-0.5b-grpo-mmlu"
 logging_dir: "./logs"
 logging_steps: 10
 save_steps: 100
 save_total_limit: 3
 
 # Weights & Biases integration
-use_wandb: false
+use_wandb: true
 wandb_project: "trl"
 wandb_entity: "nu-llpr"
-run_name: "qwen-0.5b-grpo-mmlu-correct"
+run_name: "qwen-0.5b-grpo-mmlu"
+
+# WandB tracking options
+track_metrics:
+  - "loss"
+  - "learning_rate"
+  - "mean_reward"
+  - "accuracy"
+  - "subject_accuracy"
