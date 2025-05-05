@@ -1,7 +1,7 @@
 from datasets import load_dataset
-from transformers import AutoModelForCausalLM, BitsAndBytesConfig, TrainingArguments
-from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
-from trl import GRPOConfig, GRPOTrainer
+from transformers import AutoModelForCausalLM
+from peft import LoraConfig, get_peft_model
+from trl import MAGRPOConfig, MAGRPOTrainer
 import torch
 import argparse
 import yaml
@@ -10,7 +10,7 @@ import os
 def parse_arguments():
     """Parse command line arguments for configuration settings."""
     parser = argparse.ArgumentParser(
-        description="Fine-tune a language model with GRPO and different compression levels."
+        description="Fine-tune a language model with MAGRPO and different compression levels."
     )
     parser.add_argument(
         "--config", 
@@ -83,7 +83,7 @@ def main():
     use_wandb = config.get('use_wandb', False)
     wandb_project = config.get('wandb_project', 'language-model-training')
     wandb_entity = config.get('wandb_entity', None)
-    run_name = config.get('run_name', f'qwen-0.5b-grpo-tldr')
+    run_name = config.get('run_name', f'qwen-0.5b-magrpo-tldr')
     if use_wandb:
         # Initialize wandb if enabled
         if wandb_entity:
@@ -142,8 +142,8 @@ def main():
     model = get_peft_model(model, peft_config)
     model.print_trainable_parameters()  # Print percentage of trainable parameters
     
-    # Configure the GRPO trainer
-    training_args = GRPOConfig(
+    # Configure the MAGRPO trainer
+    training_args = MAGRPOConfig(
         output_dir=config.get('output_dir', './results'),
         num_train_epochs=config.get('num_train_epochs', 3),
         per_device_train_batch_size=config.get('batch_size', 4),
@@ -156,7 +156,7 @@ def main():
         save_steps=config.get('save_steps', 500),
         save_total_limit=config.get('save_total_limit', 3),
         
-        # GRPO specific parameters
+        # MAGRPO specific parameters
         max_prompt_length=config.get('max_prompt_length', 512),
         max_completion_length=config.get('max_completion_length', 128),
         num_generations=config.get('num_generations', 8),
@@ -170,17 +170,10 @@ def main():
     )
     
     # Configure reward functions
-    reward_functions = []
+    reward_functions = [reward_length, reward_capitalization]
     
-    # Add custom reward functions from config
-    if config.get('use_length_reward', True):
-        reward_functions.append(reward_length)
-    
-    if config.get('use_capitalization_reward', True):
-        reward_functions.append(reward_capitalization)
-    
-    # Initialize the GRPO trainer
-    trainer = GRPOTrainer(
+    # Initialize the MAGRPO trainer
+    trainer = MAGRPOTrainer(
         model=model,
         args=training_args,
         train_dataset=dataset,

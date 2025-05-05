@@ -1,4 +1,4 @@
-# Model training configuration for GRPO
+# Model training configuration for MAGRPO
 
 # Model settings
 model_name: "Qwen/Qwen2.5-0.5B"
@@ -10,7 +10,7 @@ target_modules:
 
 # Dataset settings
 dataset: "trl-lib/tldr"
-dataset_split: "train[:20000]"
+dataset_split: "train[:10000]"
 
 # Training parameters
 batch_size: 2
@@ -20,18 +20,16 @@ num_train_epochs: 3
 warmup_steps: 100
 max_grad_norm: 0.3
 
-# GRPO specific parameters
+# MAGRPO specific parameters
 max_prompt_length: 256
 max_completion_length: 128
-num_generations: 4  # Number of generations per prompt (group size)
+num_generations: 4
 temperature: 1.0
 top_p: 0.9
 top_k: 50
 
 # Reward function settings
-use_length_reward: true
-use_capitalization_reward: true
-reward_weights: [0.3, 0.7]  # Weights for the reward functions (length, capitalization)
+reward_weights: [0.3, 0.7]
 
 # Output settings
 output_dir: "./results"
