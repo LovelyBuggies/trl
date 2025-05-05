@@ -97,6 +97,8 @@ _import_structure = {
         "XPOConfig",
         "XPOTrainer",
     ],
+    "rewards.rewards": ["reward_length", "reward_capitalization"],
+    "rewards.ma_rewards": ["reward_length_ratio"],
     "trainer.callbacks": ["MergeModelCallback", "RichProgressCallback", "SyncRefModelCallback"],
     "trainer.utils": ["get_kbit_device_map", "get_peft_config", "get_quantization_config"],
 }
@@ -197,6 +199,9 @@ if TYPE_CHECKING:
     )
     from .trainer.callbacks import RichProgressCallback, SyncRefModelCallback
     from .trainer.utils import get_kbit_device_map, get_peft_config, get_quantization_config
+
+    from .rewards.rewards import reward_length, reward_capitalization
+    from .rewards.ma_rewards import reward_length_ratio
 
     try:
         if not is_diffusers_available():

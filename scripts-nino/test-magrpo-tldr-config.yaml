@@ -19,7 +19,7 @@ dataset_split: "train[:10000]"
 batch_size: 2
 gradient_accumulation_steps: 8
 learning_rate: 1e-5
-num_train_epochs: 3
+num_train_epochs: 10
 warmup_steps: 100
 max_grad_norm: 0.3
 
@@ -43,7 +43,7 @@ save_steps: 200
 save_total_limit: 3
 
 # Weights & Biases integration
-use_wandb: true
+use_wandb: false
 wandb_project: "trl"
 wandb_entity: "nu-llpr"  # Your Weights & Biases username or organization
 run_name: "qwen-0.5b-magrpo-tldr"

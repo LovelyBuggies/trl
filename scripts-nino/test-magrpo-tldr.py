@@ -2,9 +2,35 @@ from datasets import load_dataset
 from transformers import AutoModelForCausalLM
 from peft import LoraConfig, get_peft_model
 from trl import MAGRPOConfig, MAGRPOTrainer
+from trl import reward_length_ratio
 
-from .rewards import reward_length, reward_capitalization
-from .utils import parse_arguments, load_config
+import argparse
+import yaml
+def parse_arguments():
+    """Parse command line arguments for configuration settings."""
+    parser = argparse.ArgumentParser(
+        description="Fine-tune a language model with MAGRPO and different compression levels."
+    )
+    parser.add_argument(
+        "--config",
+        type=str,
+        help="Path to YAML configuration file"
+    )
+    return parser.parse_args()
+
+def load_config(config_file):
+    """Load configuration from YAML file."""
+    try:
+        with open(config_file, 'r') as stream:
+            return yaml.safe_load(stream)
+    except yaml.YAMLError as exc:
+        print(f"Error in configuration file: {exc}")
+        return {}
+    except FileNotFoundError:
+        print(f"Configuration file not found: {config_file}")
+        return {}
+
+
 
 def main():
     args = parse_arguments()
@@ -83,14 +109,14 @@ def main():
         report_to="wandb" if use_wandb else "none",
         run_name=run_name if use_wandb else None,
     )
-    reward_functions = [reward_length, reward_capitalization]
     
     """ Training the model """
     trainer = MAGRPOTrainer(
         model=model,
+        num_agents=2,
         args=training_args,
         train_dataset=dataset,
-        reward_funcs=reward_functions,
+        reward_funcs=reward_length_ratio,
     )
     trainer.train()
     

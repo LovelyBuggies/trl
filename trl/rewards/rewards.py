@@ -1,7 +1,3 @@
-"""
-Reward functions for evaluating the quality of completions.
-"""
-
 def reward_length(completions, **kwargs):
     """Reward function that favors completions close to exactly 50 characters."""
     # duel reward
