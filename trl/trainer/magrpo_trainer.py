@@ -179,6 +179,21 @@ class MAGRPOTrainer(Trainer):
         # Decode the generated completions
         completions = self.processing_class.batch_decode(completion_ids, skip_special_tokens=True)
 
+        # Concatenate prompt_mask with completion_mask for logit computation
+        attention_mask = torch.cat([prompt_mask, completion_mask], dim=1)  # (B, P+C)
+
+        logits_to_keep = completion_ids.size(1)  # we only need to compute the logits for the completion tokens
+
+        with torch.no_grad():
+            # When using num_iterations == 1, old_per_token_logps == per_token_logps, so we can skip its
+            # computation here, and use per_token_logps.detach() instead.
+            if self.num_iterations > 1:
+                old_per_token_logps = self._get_per_token_logps(
+                    self.model, prompt_completion_ids, attention_mask, logits_to_keep, self.args.per_device_train_batch_size
+                )
+            else:
+                old_per_token_logps = None
+
         return {
             "prompts": prompts,
             "prompt_ids": prompt_ids,
