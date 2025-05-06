@@ -248,11 +248,7 @@ class MAGRPOTrainer:
                                 "agent1_loss": agent_losses[0] if len(agent_losses) > 0 else 0,
                                 "agent2_loss": agent_losses[1] if len(agent_losses) > 1 else 0,
                                 "batch_rewards_mean": np.mean(rewards) if rewards else 0,
-                                "batch_rewards_std": np.std(rewards) if rewards else 0,
-                                "batch_rewards_min": min(rewards) if rewards else 0,
-                                "batch_rewards_max": max(rewards) if rewards else 0,
                                 "step": epoch * len(self.get_train_dataloader()) + batch_idx,
-                                "prompt": prompt
                             })
 
                             # Log a sample of completions periodically
@@ -261,8 +257,6 @@ class MAGRPOTrainer:
                                     sample_completions = agent_completions_list[agent_idx]
                                     if sample_completions:
                                         wandb.log({
-                                            f"agent{agent_idx + 1}_sample_completion": sample_completions[
-                                                0] if sample_completions else "",
                                             f"agent{agent_idx + 1}_completion_length": len(
                                                 sample_completions[0]) if sample_completions else 0
                                         })
@@ -283,9 +277,6 @@ class MAGRPOTrainer:
                 "epoch": epoch,
                 "epoch_loss": epoch_loss / len(self.get_train_dataloader()) if epoch_loss else 0,
                 "epoch_avg_reward": avg_reward,
-                "epoch_reward_std": np.std(epoch_rewards) if epoch_rewards else 0,
-                "epoch_min_reward": min(epoch_rewards) if epoch_rewards else 0,
-                "epoch_max_reward": max(epoch_rewards) if epoch_rewards else 0,
             }
 
             # Add agent-specific reward tracking
@@ -800,8 +791,6 @@ class MAGRPOTrainer:
             "epoch": epoch,
             "batch": batch_idx,
             "average_reward": avg_reward,
-            "min_reward": min(rewards) if rewards else 0,
-            "max_reward": max(rewards) if rewards else 0,
         }
 
         self.logger.info(f"Training progress: {metrics}")
@@ -837,12 +826,6 @@ class MAGRPOTrainer:
                        f"{agent_dir}/optimizer.pt")
 
         self.logger.info(f"Checkpoint saved at epoch {epoch}, batch {batch_idx}")
-
-        # Log model checkpoint saving to wandb
-        if self.wandb_initialized:
-            wandb.log({
-                "saved_checkpoint": f"epoch_{epoch}_batch_{batch_idx}"
-            })
 
     def _load_from_checkpoint(self, checkpoint_dir):
         """
@@ -937,6 +920,22 @@ def length_ratio_reward(completions1, completions2):
     return rewards
 
 
+def diversity_ratio_reward(completions1, completions2):
+    rewards = []
+    for c1, c2 in zip(completions1, completions2):
+        # Simple lexical diversity - count unique words
+        words1 = set(c1.lower().split())
+        words2 = set(c2.lower().split())
+
+        # Measure word overlap (lower means more diverse)
+        common_words = words1.intersection(words2)
+        unique_words = words1.union(words2)
+
+        # Calculate diversity ratio (higher means more diverse)
+        diversity_ratio = len(unique_words) / (len(common_words) + 1) if len(common_words) > 0 else 10.
+        rewards.append(float(diversity_ratio))
+
+    return rewards
 
 # Updated example_usage function with wandb configuration
 def example_usage():
@@ -950,7 +949,7 @@ def example_usage():
     # Configure MAGRPO
     config = MAGRPOConfig(
         output_dir="./magrpo_output",
-        num_train_epochs=100,
+        num_train_epochs=50,
         per_device_train_batch_size=4,
         learning_rate=5e-5,
         logging_steps=10,
