@@ -1,54 +1,24 @@
-# Copyright 2020-2025 Shuo Liu
-
 import torch
-from typing import Any, Callable, List, Optional, Union
+from typing import Callable, List, Optional, Union, Dict, Any
 from datasets import Dataset, IterableDataset
 from transformers import (
     PreTrainedModel,
-    Trainer,
-    AutoTokenizer,
-    GenerationConfig,
     PreTrainedTokenizerBase,
+    DataCollatorWithPadding,
+    Trainer,
+    TrainingArguments
 )
-from .utils import selective_log_softmax
-from ..extras.profiling import profiling_decorator
-from ..models import unwrap_model_for_generation
-from trl import GRPOTrainer, MAGRPOConfig
+from torch.utils.data import DataLoader
+from trl import MAGRPOConfig
+import numpy as np
+import logging
+import os
+import wandb  # Add wandb import
 
-from contextlib import nullcontext
-
-# What we call a reward function is a callable that takes a list of prompts and completions and returns a list of
-# rewards. When it's a string, it's a model ID, so it's loaded as a pretrained model.
 RewardFunc = Union[str, PreTrainedModel, Callable[[List[str], List[str]], List[float]]]
 
-def split_tensor_dict(
-    tensor_dict: dict[str, Optional[torch.Tensor]], num_chunks: int
-) -> list[dict[str, Optional[torch.Tensor]]]:
-    """
-    Splits a dictionary of tensors along the first dimension into `num_chunks` equal parts.
-    """
-    first_tensor = next(tensor for tensor in tensor_dict.values() if tensor is not None)
-    chunk_size = first_tensor.shape[0] // num_chunks
-    return [
-        {
-            key: tensor[i * chunk_size : (i + 1) * chunk_size] if tensor is not None else None
-            for key, tensor in tensor_dict.items()
-        }
-        for i in range(num_chunks)
-    ]
 
-def nanmin(tensor: torch.Tensor) -> torch.Tensor:
-    if torch.isnan(tensor).all():
-        return torch.tensor(float("nan"), dtype=tensor.dtype, device=tensor.device)
-    return torch.min(tensor[~torch.isnan(tensor)])
-
-def nanmax(tensor: torch.Tensor) -> torch.Tensor:
-    if torch.isnan(tensor).all():
-        return torch.tensor(float("nan"), dtype=tensor.dtype, device=tensor.device)
-    return torch.max(tensor[~torch.isnan(tensor)])
-
-
-class MAGRPOTrainer(Trainer):
+class MAGRPOTrainer:
     """
     Multi-Agent Group Relative Policy Optimization Trainer (MAGRPO).
     Currently, only supports homogenous agents and shared reward functions.
@@ -60,6 +30,7 @@ class MAGRPOTrainer(Trainer):
         args (MAGRPOConfig, optional): The training arguments. If not provided, default arguments will be used.
         train_dataset (Dataset or IterableDataset, optional): The training dataset. If not provided, the default
             dataset will be used.
+        wandb_config (dict, optional): Configuration for Weights & Biases logging.
     """
 
     def __init__(
@@ -69,44 +40,115 @@ class MAGRPOTrainer(Trainer):
             reward_funcs: Union[RewardFunc, List[RewardFunc]],
             args: Optional[MAGRPOConfig] = None,
             train_dataset: Optional[Union[Dataset, IterableDataset]] = None,
-            processing_class: Optional[PreTrainedTokenizerBase] = None,
+            tokenizer: Optional[PreTrainedTokenizerBase] = None,
+            wandb_config: Optional[Dict[str, Any]] = None,
     ):
-
-        def data_collator(features):  # No data collation is needed in GRPO
-            return features
-
-        # Processing class
-        if processing_class is None:
-            processing_class = AutoTokenizer.from_pretrained(model.config._name_or_path, padding_side="left")
-        if processing_class.pad_token is None:
-            processing_class.pad_token = processing_class.eos_token
-
-        super().__init__(
-            model=model,
-            args=args,
-            data_collator=data_collator,
-            train_dataset=train_dataset,
-            processing_class=processing_class,
-        )
-
         self.num_agents = num_agents
         self.reward_funcs = reward_funcs
-        self.agents = [model for _ in range(num_agents)]  # For homogenous agents
+        self.args = args if args is not None else MAGRPOConfig()
+        if self.args.num_generations < 2:
+            raise ValueError("MAGRPO requires num_generations to be at least 2 for multi-agent training.")
 
-        self.generation_config = GenerationConfig(
-            max_new_tokens=args.max_completion_length,
-            do_sample=True,
-            pad_token_id=processing_class.pad_token_id,
-            bos_token_id=processing_class.bos_token_id,
-            eos_token_id=processing_class.eos_token_id,
-            temperature=args.temperature,
-            top_p=args.top_p,
-            top_k=args.top_k,
-            min_p=args.min_p,
-            repetition_penalty=args.repetition_penalty,
-            cache_implementation=args.cache_implementation,
+        self.train_dataset = train_dataset
+        self.tokenizer = tokenizer
+
+        # Initialize agents - homogenous agents all based on the same model
+        if isinstance(model, str):
+            from transformers import AutoModelForCausalLM
+            self.agents = [AutoModelForCausalLM.from_pretrained(model) for _ in range(num_agents)]
+            self.model_name = model
+        else:
+            # Create TRUE deep copies of the model for each agent
+            import copy
+            self.agents = []
+            self.model_name = model.__class__.__name__
+            for _ in range(num_agents):
+                # Create a new instance with the same configuration
+                agent_copy = type(model)(model.config)
+                # Copy the state dictionary to transfer parameters
+                agent_copy.load_state_dict(copy.deepcopy(model.state_dict()))
+                self.agents.append(agent_copy)
+
+        # Set up logging
+        self.logger = logging.getLogger(__name__)
+
+        # Initialize optimizers for each agent
+        self.optimizers = [torch.optim.AdamW(
+            agent.parameters(),
+            lr=self.args.learning_rate,
+            weight_decay=self.args.weight_decay
+        ) for agent in self.agents]
+
+        # Initialize wandb
+        self.wandb_config = wandb_config
+        self.wandb_initialized = False
+        if self.wandb_config is not None:
+            self._init_wandb()
+
+    def _init_wandb(self):
+        """Initialize Weights & Biases for tracking."""
+        if not self.wandb_initialized:
+            # Set default wandb config if not provided
+            if self.wandb_config is None:
+                self.wandb_config = {}
+
+            # Set up default values
+            wandb_project = self.wandb_config.get("project", "trl")
+            wandb_entity = self.wandb_config.get("entity", "nu-llpr")
+            wandb_name = self.wandb_config.get("name", "test-magrpo")
+
+            # Create a dictionary with all training configurations for wandb
+            config_dict = {
+                "model_name": self.model_name,
+                "num_agents": self.num_agents,
+                "learning_rate": self.args.learning_rate,
+                "weight_decay": self.args.weight_decay,
+                "num_train_epochs": self.args.num_train_epochs,
+                "per_device_train_batch_size": self.args.per_device_train_batch_size,
+                "num_generations": self.args.num_generations,
+                "max_completion_length": self.args.max_completion_length,
+            }
+
+            # Initialize wandb
+            wandb.init(
+                project=wandb_project,
+                entity=wandb_entity,
+                name=wandb_name,
+                config=config_dict
+            )
+
+            self.wandb_initialized = True
+            self.logger.info(
+                f"Initialized wandb with project={wandb_project}, entity={wandb_entity}, name={wandb_name}")
+
+    def get_train_dataloader(self) -> DataLoader:
+        """
+        Returns the training DataLoader.
+        """
+        if self.train_dataset is None:
+            raise ValueError("Trainer: training requires a train_dataset.")
+
+        # Create a custom collate function that handles raw prompts
+        def collate_fn(examples):
+            # For datasets with only 'prompt' field, we don't need tokenization here
+            # We'll just return the batch as-is and handle tokenization in _generate_completions
+            if all(isinstance(ex, dict) and 'prompt' in ex for ex in examples):
+                return examples
+            # For more complex datasets that might already have tokenized fields
+            else:
+                if self.tokenizer:
+                    return DataCollatorWithPadding(self.tokenizer)(examples)
+                else:
+                    return examples
+
+        return DataLoader(
+            self.train_dataset,
+            batch_size=self.args.per_device_train_batch_size,
+            collate_fn=collate_fn,
+            shuffle=True,
+            drop_last=self.args.dataloader_drop_last,
+            num_workers=self.args.dataloader_num_workers,
         )
-        self.mask_truncated_completions = args.mask_truncated_completions
 
     def train(self, resume_from_checkpoint=None, **kwargs):
         """
@@ -114,223 +156,848 @@ class MAGRPOTrainer(Trainer):
 
         This method coordinates the training of multiple agents, collecting
         outputs from each agent and computing rewards based on their interactions.
+
+        Args:
+            resume_from_checkpoint (str, optional): Path to a checkpoint to resume training from.
+            **kwargs: Additional arguments to pass to the model during generation.
         """
+        # Initialize wandb if not already done
+        if self.wandb_config is not None and not self.wandb_initialized:
+            self._init_wandb()
+
+        # Setup devices for training
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        for agent in self.agents:
+            agent.to(device)
+            agent.train()
+
+        # Load checkpoint if specified
+        start_epoch = 0
+        if resume_from_checkpoint:
+            start_epoch = self._load_from_checkpoint(resume_from_checkpoint)
+
         # Create the data pipeline for generating examples
-        for epoch in range(int(self.args.num_train_epochs)):
+        for epoch in range(start_epoch, int(self.args.num_train_epochs)):
+            epoch_loss = 0.0
+            epoch_rewards = []
+            epoch_agent_rewards = [[] for _ in range(self.num_agents)]
+
             for batch_idx, batch in enumerate(self.get_train_dataloader()):
-                # Get the prompts from the batch
-                prompts = [sample["prompt"] for sample in batch]
+                # If batch is already a list of dictionaries, we work with individual prompts
+                if isinstance(batch, list) and all(isinstance(item, dict) for item in batch):
+                    # Process each prompt separately - this is the expected format
+                    for prompt_idx, prompt_item in enumerate(batch):
+                        prompt = prompt_item["prompt"]
 
-                # Generate completions from each agent
-                all_completions = []
-                for agent_idx in range(self.num_agents):
-                    agent_completions = self._generate_completions(
-                        self.agents[agent_idx],
-                        prompts,
-                        num_return_sequences=self.args.num_generations,
-                        max_length=self.args.max_completion_length,
-                    )
-                    all_completions.append(agent_completions)
+                        # Generate completions from each agent for this single prompt
+                        all_completions = []
+                        for agent_idx in range(self.num_agents):
+                            # Zero gradients for each agent
+                            self.optimizers[agent_idx].zero_grad()
 
-                # Compute rewards based on all agents' completions
-                rewards = self._compute_rewards(prompts, [agent_completions["completions"] for agent_completions in all_completions])
+                            agent_completions = self._generate_completions(
+                                self.agents[agent_idx],
+                                [prompt],  # Pass as a single-item list
+                                num_return_sequences=self.args.num_generations,
+                                max_length=self.args.max_completion_length,
+                                **kwargs
+                            )
+                            all_completions.append(agent_completions)
 
-                # Update each agent using the rewards
-                for agent_idx in range(self.num_agents):
-                    self._compute_loss(self.agents[agent_idx], all_completions[agent_idx])
+                        # Extract completions for reward calculation
+                        agent_completions_list = []
+                        for agent_idx in range(self.num_agents):
+                            agent_completions_list.append(all_completions[agent_idx]["completions"][0])
+
+                        # Compute rewards based on all agents' completions for this prompt
+                        rewards = self._compute_rewards([prompt], agent_completions_list)
+                        epoch_rewards.extend(rewards)
+
+                        # Track rewards per agent for more detailed logging
+                        if self.num_agents == 2:  # For the specific case of two agents
+                            # In this implementation, rewards measure the ratio of agent2's output to agent1's
+                            # So agent1's reward would be negative of agent2's reward
+                            for i, reward in enumerate(rewards):
+                                epoch_agent_rewards[0].append(-reward)  # Agent 1 wants shorter outputs
+                                epoch_agent_rewards[1].append(reward)  # Agent 2 wants longer outputs
+
+                        # Update each agent using the rewards with proper gradient tracking
+                        batch_loss = 0.0
+                        agent_losses = []
+                        for agent_idx in range(self.num_agents):
+                            # Compute loss with the new function that enables proper gradient tracking
+                            agent_loss = self._compute_loss_with_gradients(
+                                self.agents[agent_idx],
+                                all_completions[agent_idx],
+                                rewards if agent_idx == 1 else [-r for r in rewards]  # Invert rewards for agent1
+                            )
+
+                            # Backward pass and optimization
+                            agent_loss.backward()
+                            self.optimizers[agent_idx].step()
+
+                            batch_loss += agent_loss.detach().item()
+                            agent_losses.append(agent_loss.detach().item())
+
+                        epoch_loss += batch_loss
+
+                        # Log to wandb per batch
+                        if self.wandb_initialized:
+                            wandb.log({
+                                "batch_loss": batch_loss,
+                                "agent1_loss": agent_losses[0] if len(agent_losses) > 0 else 0,
+                                "agent2_loss": agent_losses[1] if len(agent_losses) > 1 else 0,
+                                "batch_rewards_mean": np.mean(rewards) if rewards else 0,
+                                "batch_rewards_std": np.std(rewards) if rewards else 0,
+                                "batch_rewards_min": min(rewards) if rewards else 0,
+                                "batch_rewards_max": max(rewards) if rewards else 0,
+                                "step": epoch * len(self.get_train_dataloader()) + batch_idx,
+                                "prompt": prompt
+                            })
+
+                            # Log a sample of completions periodically
+                            if batch_idx % 10 == 0 and rewards:
+                                for agent_idx in range(self.num_agents):
+                                    sample_completions = agent_completions_list[agent_idx]
+                                    if sample_completions:
+                                        wandb.log({
+                                            f"agent{agent_idx + 1}_sample_completion": sample_completions[
+                                                0] if sample_completions else "",
+                                            f"agent{agent_idx + 1}_completion_length": len(
+                                                sample_completions[0]) if sample_completions else 0
+                                        })
 
                 # Log progress
                 if batch_idx % self.args.logging_steps == 0:
-                    self._log_training_progress(epoch, batch_idx, rewards)
+                    self._log_training_progress(epoch, batch_idx, epoch_rewards[-len(batch):] if epoch_rewards else [])
 
                 # Save checkpoints
                 if batch_idx % self.args.save_steps == 0:
                     self._save_checkpoints(epoch, batch_idx)
 
-    def _generate_completions(self, agent, prompts, num_return_sequences=1, max_length=128):
-        """Generate completions from EACH agent given prompt."""
-        prompt_inputs = self.processing_class(
-            text=prompts, return_tensors="pt", padding=True, padding_side="right", add_special_tokens=False
-        )
-        prompt_inputs = super()._prepare_inputs(prompt_inputs)
-        prompt_ids, prompt_mask = prompt_inputs["input_ids"], prompt_inputs["attention_mask"]
+            # Log epoch summary
+            avg_reward = sum(epoch_rewards) / len(epoch_rewards) if epoch_rewards else 0
+            avg_agent_rewards = [sum(rewards) / len(rewards) if rewards else 0 for rewards in epoch_agent_rewards]
 
-        # Generate completions using the agent
-        with unwrap_model_for_generation(
-                self.model_wrapped, self.accelerator, gather_deepspeed3_params=self.args.ds3_gather_for_generation
-        ) as unwrapped_model:
-            with (nullcontext()):
-                prompt_completion_ids = unwrapped_model.generate(
-                    prompt_ids, attention_mask=prompt_mask, generation_config=self.generation_config, num_return_sequences=num_return_sequences
-                )
+            epoch_log = {
+                "epoch": epoch,
+                "epoch_loss": epoch_loss / len(self.get_train_dataloader()) if epoch_loss else 0,
+                "epoch_avg_reward": avg_reward,
+                "epoch_reward_std": np.std(epoch_rewards) if epoch_rewards else 0,
+                "epoch_min_reward": min(epoch_rewards) if epoch_rewards else 0,
+                "epoch_max_reward": max(epoch_rewards) if epoch_rewards else 0,
+            }
 
-        prompt_length = prompt_ids.size(1)
-        prompt_ids = prompt_completion_ids[:, :prompt_length]
-        completion_ids = prompt_completion_ids[:, prompt_length:]
+            # Add agent-specific reward tracking
+            for i, avg_agent_reward in enumerate(avg_agent_rewards):
+                epoch_log[f"agent{i + 1}_avg_reward"] = avg_agent_reward
 
-        # Mask everything after the first EOS token
-        device = self.accelerator.device
-        is_eos = completion_ids == self.processing_class.eos_token_id
-        eos_idx = torch.full((is_eos.size(0),), is_eos.size(1), dtype=torch.long, device=device)
-        eos_idx[is_eos.any(dim=1)] = is_eos.int().argmax(dim=1)[is_eos.any(dim=1)]
-        sequence_indices = torch.arange(is_eos.size(1), device=device).expand(is_eos.size(0), -1)
-        completion_mask = (sequence_indices <= eos_idx.unsqueeze(1)).int()
+            if self.wandb_initialized:
+                wandb.log(epoch_log)
 
-        # Decode the generated completions
-        completions = self.processing_class.batch_decode(completion_ids, skip_special_tokens=True)
+            self.logger.info(f"Epoch {epoch}: Loss={epoch_loss / len(self.get_train_dataloader())}, "
+                             f"Avg Reward={avg_reward}, "
+                             f"Agent1 Avg Reward={avg_agent_rewards[0]}, "
+                             f"Agent2 Avg Reward={avg_agent_rewards[1]}")
 
-        # Concatenate prompt_mask with completion_mask for logit computation
-        attention_mask = torch.cat([prompt_mask, completion_mask], dim=1)  # (B, P+C)
+        # Close wandb
+        if self.wandb_initialized:
+            wandb.finish()
 
-        logits_to_keep = completion_ids.size(1)  # we only need to compute the logits for the completion tokens
+    def _generate_completions(self, agent, prompts, num_return_sequences=1, max_length=128, **kwargs):
+        """
+        Generate completions from an agent given prompts, preserving model state.
 
-        with torch.no_grad():
-            # When using num_iterations == 1, old_per_token_logps == per_token_logps, so we can skip its
-            # computation here, and use per_token_logps.detach() instead.
-            if self.num_iterations > 1:
-                old_per_token_logps = self._get_per_token_logps(
-                    self.model, prompt_completion_ids, attention_mask, logits_to_keep, self.args.per_device_train_batch_size
-                )
-            else:
-                old_per_token_logps = None
+        Args:
+            agent (PreTrainedModel): The agent model to generate completions.
+            prompts (List[str]): List of prompts to generate completions for.
+            num_return_sequences (int, optional): Number of completions to generate per prompt.
+            max_length (int, optional): Maximum length of the generated completions.
+            **kwargs: Additional arguments to pass to the model during generation.
+
+        Returns:
+            Dict: A dictionary containing generated completions and associated data.
+        """
+        device = agent.device
+        batch_size = len(prompts)
+
+        # Ensure tokenizer exists
+        if self.tokenizer is None:
+            raise ValueError("Tokenizer is required for generating completions")
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+
+        # Tokenize prompts
+        prompt_encodings = self.tokenizer(
+            prompts,
+            padding=True,
+            truncation=True,
+            return_tensors="pt"
+        ).to(device)
+
+        prompt_input_ids = prompt_encodings.input_ids
+        prompt_attention_mask = prompt_encodings.attention_mask
+
+        # Store original model state and gradient settings
+        training_mode = agent.training
+        original_requires_grad = {}
+
+        # Save original requires_grad states
+        for name, param in agent.named_parameters():
+            original_requires_grad[name] = param.requires_grad
+            param.requires_grad = False  # Temporarily disable gradients for generation
+
+        agent.eval()  # Set to eval mode for generation
+
+        # Generate completions without gradients
+        generation_output = None
+        try:
+            # Add beam search parameters when num_return_sequences > 1
+            generation_kwargs = {
+                "input_ids": prompt_input_ids,
+                "attention_mask": prompt_attention_mask,
+                "max_length": max_length,
+                "output_scores": True,
+                "return_dict_in_generate": True,
+            }
+
+            # If requesting multiple sequences, use sampling for diversity
+            if num_return_sequences > 1:
+                generation_kwargs.update({
+                    "do_sample": True,  # Enable sampling for randomness
+                    "temperature": 0.7,  # Control randomness (higher = more random)
+                    "top_p": 0.9,  # Nucleus sampling
+                    "top_k": 50,  # Limit vocabulary to top k tokens
+                    "num_beams": 1,  # Disable beam search when sampling
+                    "num_return_sequences": num_return_sequences,
+                })
+
+            # Add any additional user-provided kwargs
+            generation_kwargs.update(kwargs)
+
+            generation_output = agent.generate(**generation_kwargs)
+        except Exception as e:
+            # Restore model state before raising exception
+            agent.train(training_mode)
+            # Restore original requires_grad states
+            for name, param in agent.named_parameters():
+                if name in original_requires_grad:
+                    param.requires_grad = original_requires_grad[name]
+            raise ValueError(f"Generation failed: {str(e)}")
+
+        # Restore original model state and gradients
+        agent.train(training_mode)
+        for name, param in agent.named_parameters():
+            if name in original_requires_grad:
+                param.requires_grad = original_requires_grad[name]
+
+        # Extract completion tokens (excluding prompt tokens)
+        completion_input_ids = generation_output.sequences
+
+        # For each prompt, we need to find its actual length in tokens
+        # to properly extract just the completion part
+        prompt_lengths = []
+        for b in range(batch_size):
+            # Get the prompt length by finding where padding starts or using full length
+            prompt_len = prompt_input_ids[b].shape[0]
+            # Find where padding token starts if any
+            pad_positions = (prompt_input_ids[b] == self.tokenizer.pad_token_id).nonzero()
+            if pad_positions.shape[0] > 0:
+                # Use the position of the first padding token
+                prompt_len = pad_positions[0].item()
+            prompt_lengths.append(prompt_len)
+
+        # Extract completion text
+        completions = []
+        completion_tokens_list = []
+
+        # Calculate total sequence count
+        total_sequences = completion_input_ids.shape[0]
+
+        # Ensure this matches expected count
+        if total_sequences != batch_size * num_return_sequences:
+            self.logger.warning(f"Expected {batch_size * num_return_sequences} sequences but got {total_sequences}")
+
+        # Process each prompt and its multiple completions
+        for b in range(batch_size):
+            prompt_len = prompt_lengths[b]
+            batch_completions = []
+            batch_completion_tokens = []
+
+            # Get all sequences for this prompt
+            start_idx = b * num_return_sequences
+            end_idx = start_idx + num_return_sequences
+
+            # Ensure we don't go out of bounds
+            end_idx = min(end_idx, total_sequences)
+
+            for s in range(start_idx, end_idx):
+                # Get only the completion part (exclude the prompt tokens)
+                completion_tokens = completion_input_ids[s, prompt_len:]
+                batch_completion_tokens.append(completion_tokens)
+
+                # Decode to text
+                completion_text = self.tokenizer.decode(completion_tokens, skip_special_tokens=True)
+                batch_completions.append(completion_text)
+
+            completions.append(batch_completions)
+            completion_tokens_list.append(batch_completion_tokens)
+
+        # Create attention masks for completions
+        completion_attention_masks = []
+        for batch_tokens in completion_tokens_list:
+            batch_masks = []
+            for tokens in batch_tokens:
+                mask = torch.ones(len(tokens), device=device)
+                batch_masks.append(mask)
+            completion_attention_masks.append(batch_masks)
+
+        # Extract logits for computing loss
+        logits = generation_output.scores if hasattr(generation_output, 'scores') else []
 
         return {
             "prompts": prompts,
-            "prompt_ids": prompt_ids,
-            "prompt_mask": prompt_mask,
+            "prompt_input_ids": prompt_input_ids,
+            "prompt_attention_mask": prompt_attention_mask,
             "completions": completions,
-            "completion_ids": completion_ids,
-            "completion_mask": completion_mask,
+            "completion_input_ids": completion_tokens_list,
+            "completion_attention_mask": completion_attention_masks,
+            "logits": logits
         }
 
     def _compute_rewards(self, prompts, completions_list):
+        """
+        Compute rewards based on completions from agents.
+
+        Args:
+            prompts (List[str]): The original prompts.
+            completions_list (List[List[str]]): List of completions for each agent.
+                For 2 agents, the shape is expected to be [agent1_completions, agent2_completions].
+
+        Returns:
+            List[float]: List of rewards for each completion pair.
+        """
         if self.num_agents == 2 and callable(self.reward_funcs):
-            return self.reward_funcs(completions_list[0], completions_list[1])
+            # Handle the case with 2 agents and a callable reward function
+
+            # Extract all completions for each agent
+            # For a single prompt with multiple generations per agent
+            if len(prompts) == 1:
+                # completions_list should contain lists of completions for each agent
+                # [agent1_completions_list, agent2_completions_list]
+                # where each agent_completions_list contains all generations
+
+                # First make sure we have the right structure
+                if not isinstance(completions_list[0], list) or not isinstance(completions_list[1], list):
+                    self.logger.error(
+                        f"Expected lists of completions, got: {type(completions_list[0])}, {type(completions_list[1])}")
+                    # Try to convert to lists if possible
+                    completions_list = [
+                        [completions_list[0]] if not isinstance(completions_list[0], list) else completions_list[0],
+                        [completions_list[1]] if not isinstance(completions_list[1], list) else completions_list[1]
+                    ]
+
+                # Log the number of completions we're processing
+                self.logger.info(
+                    f"Processing {len(completions_list[0])} completions from agent 1 and {len(completions_list[1])} from agent 2")
+
+                # We need to compute rewards for each possible pair of completions
+                # between the two agents
+                all_rewards = []
+
+                # Make sure we have the same number of completions from each agent
+                min_completions = min(len(completions_list[0]), len(completions_list[1]))
+
+                # For each pair of completions from the agents, compute a reward
+                for i in range(min_completions):
+                    completion1 = completions_list[0][i]
+                    completion2 = completions_list[1][i]
+
+                    # Log completion lengths for debugging
+                    if self.wandb_initialized and i == 0:  # Just log the first pair
+                        wandb.log({
+                            "agent1_completion_length": len(completion1),
+                            "agent2_completion_length": len(completion2),
+                            "length_ratio": len(completion2) / len(completion1) if len(completion1) > 0 else 0
+                        })
+
+                    # Call the reward function for this pair
+                    pair_reward = self.reward_funcs([completion1], [completion2])
+
+                    # Add to our list of rewards
+                    all_rewards.extend(pair_reward)
+
+                return all_rewards
+            else:
+                # For batch processing (multiple prompts)
+                # Take the first generation for each prompt if there are multiple
+                agent1_completions = []
+                agent2_completions = []
+
+                # Extract the first generation for each prompt from each agent
+                for prompt_idx in range(len(prompts)):
+                    if prompt_idx < len(completions_list[0]):
+                        # First agent's first completion for this prompt
+                        agent1_completion = completions_list[0][prompt_idx][0] if isinstance(
+                            completions_list[0][prompt_idx], list) else completions_list[0][prompt_idx]
+                        agent1_completions.append(agent1_completion)
+
+                    if prompt_idx < len(completions_list[1]):
+                        # Second agent's first completion for this prompt
+                        agent2_completion = completions_list[1][prompt_idx][0] if isinstance(
+                            completions_list[1][prompt_idx], list) else completions_list[1][prompt_idx]
+                        agent2_completions.append(agent2_completion)
+
+                # Call the reward function provided from outside
+                return self.reward_funcs(agent1_completions, agent2_completions)
         else:
             raise NotImplementedError(
-                "Currently, only the length ratio reward function for 2 agents is implemented."
+                "Currently, only the case with 2 agents and a callable reward function is implemented."
             )
 
-    @profiling_decorator
-    def _get_per_token_logps(self, model, input_ids, attention_mask, logits_to_keep, batch_size=None) -> torch.Tensor:
-        batch_size = batch_size or input_ids.size(0)  # Chunk inputs into smaller batches to reduce memory peak
-        all_logps = []
-        for i in range(0, input_ids.size(0), batch_size):
-            input_ids_batch = input_ids[i: i + batch_size]
-            attention_mask_batch = attention_mask[i: i + batch_size]
-
-            # We add 1 to `logits_to_keep` because the last logits of the sequence is later excluded
-            logits = model(
-                input_ids=input_ids_batch, attention_mask=attention_mask_batch, logits_to_keep=logits_to_keep + 1
-            ).logits
-            logits = logits[:, :-1, :]  # (B, L-1, V), exclude the last logit: it corresponds to the next token pred
-            input_ids_batch = input_ids_batch[:, -logits_to_keep:]
-            # For transformers<=4.48, logits_to_keep argument isn't supported, so here we drop logits ourselves.
-            # See https://github.com/huggingface/trl/issues/2770
-            logits = logits[:, -logits_to_keep:]
-            # Divide logits by sampling temperature.
-            # See https://huggingface.co/blog/the_n_implementation_details_of_rlhf_with_ppo#policy-training-implementation-details
-            logits = logits / self.temperature
-            logps = selective_log_softmax(logits, input_ids_batch)  # compute logprobs for the input tokens
-            all_logps.append(logps)
-        return torch.cat(all_logps, dim=0)
-
-    def _compute_loss(self, agent, completions):
+    def _compute_loss_with_gradients(self, agent, completions_data, rewards):
         """
-        Compute the loss for EACH agent.
+        Compute loss with proper gradient tracking by performing a new forward pass.
+
+        Args:
+            agent (PreTrainedModel): The agent model.
+            completions_data (dict): The completions data from _generate_completions.
+            rewards (List[float]): The rewards for each completion.
+
+        Returns:
+            torch.Tensor: The computed loss with gradients attached.
         """
-        prompt_ids = completions["prompt_ids"]
-        completion_ids = completions["completion_ids"]
-        input_ids = torch.cat([prompt_ids, completion_ids], dim=1)
-        logits_to_keep = completion_ids.size(1)  # we only need to compute the logits for the completion tokens
+        device = agent.device
 
-        per_token_logps = self._get_per_token_logps(agent, input_ids, attention_mask, logits_to_keep)
+        # Make sure we have the correct number of rewards
+        if len(rewards) == 0:
+            self.logger.warning("No rewards provided for loss computation")
+            return torch.tensor(0.0, device=device, requires_grad=True)
 
-        # Compute the KL divergence between the model and the reference model
-        if self.beta != 0.0:
-            with torch.no_grad():
-                if self.ref_model is not None:
-                    ref_per_token_logps = self._get_per_token_logps(
-                        self.ref_model, input_ids, attention_mask, logits_to_keep
+        # Convert rewards to tensor
+        rewards_tensor = torch.tensor(rewards, dtype=torch.float, device=device)
+
+        # Use baseline approach
+        rewards_baseline = rewards_tensor.mean()  # Use mean as baseline
+        advantages = rewards_tensor - rewards_baseline  # Compute advantages
+
+        # Clip advantages to reasonable range to prevent numerical instability
+        advantages = torch.clamp(advantages, min=-10.0, max=10.0)
+
+        # Set agent to train mode to ensure gradients are tracked
+        agent.train()
+
+        prompt_input_ids = completions_data["prompt_input_ids"]
+        prompt_attention_mask = completions_data["prompt_attention_mask"]
+        completion_input_ids = completions_data["completion_input_ids"]
+
+        total_loss = torch.tensor(0.0, device=device, requires_grad=True)
+        num_samples = 0
+
+        # Process each prompt in the batch
+        for batch_idx in range(len(prompt_input_ids)):
+            prompt_ids = prompt_input_ids[batch_idx]
+            prompt_mask = prompt_attention_mask[batch_idx]
+
+            # Process each generated completion for this prompt
+            for seq_idx, completion_tokens in enumerate(completion_input_ids[batch_idx]):
+                # Break if we've processed enough completions for the available rewards
+                if seq_idx >= len(advantages):
+                    break
+
+                advantage = advantages[seq_idx]
+
+                # Create input sequence by concatenating prompt with all but last token of completion
+                # (we'll predict the next token at each step)
+                if len(completion_tokens) > 0:
+                    input_ids = torch.cat([prompt_ids, completion_tokens[:-1]])
+
+                    # Target is the completion tokens
+                    target_ids = completion_tokens
+
+                    # Create attention mask for the full sequence
+                    attention_mask = torch.ones(len(input_ids), device=device)
+
+                    # Forward pass with gradients enabled
+                    outputs = agent(
+                        input_ids=input_ids.unsqueeze(0),  # Add batch dimension
+                        attention_mask=attention_mask.unsqueeze(0),  # Add batch dimension
                     )
-                else:
-                    with self.accelerator.unwrap_model(self.model).disable_adapter():
-                        ref_per_token_logps = self._get_per_token_logps(
-                            self.model, input_ids, attention_mask, logits_to_keep
-                        )
-            per_token_kl = (
-                    torch.exp(ref_per_token_logps - per_token_logps) - (ref_per_token_logps - per_token_logps) - 1
-            )
 
-        # Compute the loss
-        advantages = inputs["advantages"]
-        # When using num_iterations == 1, old_per_token_logps == per_token_logps, so we can skip it's computation (see
-        # _generate_and_score_completions) and use per_token_logps.detach() instead.
-        old_per_token_logps = inputs["old_per_token_logps"] if self.num_iterations > 1 else per_token_logps.detach()
-        coef_1 = torch.exp(per_token_logps - old_per_token_logps)
-        coef_2 = torch.clamp(coef_1, 1 - self.epsilon_low, 1 + self.epsilon_high)
-        per_token_loss1 = coef_1 * advantages.unsqueeze(1)
-        per_token_loss2 = coef_2 * advantages.unsqueeze(1)
-        per_token_loss = -torch.min(per_token_loss1, per_token_loss2)
-        if self.beta != 0.0:
-            per_token_loss = per_token_loss + self.beta * per_token_kl
+                    # Get logits for the completion part (excluding prompt)
+                    completion_logits = outputs.logits[0, prompt_ids.size(0) - 1:-1, :]
 
-        if self.loss_type == "grpo":
-            loss = ((per_token_loss * completion_mask).sum(-1) / completion_mask.sum(-1).clamp(min=1.0)).mean()
-        elif self.loss_type == "bnpo":
-            loss = (per_token_loss * completion_mask).sum() / completion_mask.sum().clamp(min=1.0)
-        elif self.loss_type == "dr_grpo":
-            loss = (per_token_loss * completion_mask).sum() / (per_token_loss.size(0) * self.max_completion_length)
-        else:
-            raise ValueError(f"Unknown loss type: {self.loss_type}")
+                    # Calculate log probabilities
+                    log_probs = []
+                    for i, token_id in enumerate(target_ids):
+                        if i < completion_logits.size(0):  # Check if we have logits for this position
+                            token_logits = completion_logits[i]
+                            token_log_prob = torch.log_softmax(token_logits, dim=-1)[token_id]
+                            log_probs.append(token_log_prob)
 
-        # Log the metrics
-        mode = "train" if self.model.training else "eval"
+                    if log_probs:
+                        sequence_log_prob = torch.stack(log_probs).sum()
+                        # Policy gradient loss: -log_prob * advantage
+                        loss = -sequence_log_prob * advantage
+                        total_loss = total_loss + loss
+                        num_samples += 1
 
-        if self.beta != 0.0:
-            mean_kl = (per_token_kl * completion_mask).sum() / completion_mask.sum()
-            self._metrics[mode]["kl"].append(self.accelerator.gather_for_metrics(mean_kl).nanmean().item())
+        # Average the loss over all processed samples
+        if num_samples > 0:
+            total_loss = total_loss / num_samples
 
-        # Compute the clipped probability ratios
-        is_low_clipped = (coef_1 < 1 - self.epsilon_low) & (advantages.unsqueeze(1) < 0)
-        is_high_clipped = (coef_1 > 1 + self.epsilon_high) & (advantages.unsqueeze(1) > 0)
-        is_region_clipped = is_low_clipped | is_high_clipped
+        # Safety check for invalid loss values
+        if torch.isnan(total_loss) or torch.isinf(total_loss):
+            self.logger.warning(f"Invalid loss detected: {total_loss}, using default loss")
+            return torch.tensor(0.1, device=device, requires_grad=True)
 
-        low_clip = (is_low_clipped * completion_mask).sum() / completion_mask.sum()
-        high_clip = (is_high_clipped * completion_mask).sum() / completion_mask.sum()
-        clip_ratio = (is_region_clipped * completion_mask).sum() / completion_mask.sum()
+        return total_loss
 
-        gathered_low_clip = self.accelerator.gather_for_metrics(low_clip)
-        self._metrics[mode]["clip_ratio/low_mean"].append(gathered_low_clip.nanmean().item())
-        self._metrics[mode]["clip_ratio/low_min"].append(nanmin(gathered_low_clip).item())
-        gathered_high_clip = self.accelerator.gather_for_metrics(high_clip)
-        self._metrics[mode]["clip_ratio/high_mean"].append(gathered_high_clip.nanmean().item())
-        self._metrics[mode]["clip_ratio/high_max"].append(nanmax(gathered_high_clip).item())
-        gathered_clip_ratio = self.accelerator.gather_for_metrics(clip_ratio)
-        self._metrics[mode]["clip_ratio/region_mean"].append(gathered_clip_ratio.nanmean().item())
-        return loss
+    def _compute_loss_with_kl_penalty(self, agent, completions_data, rewards, old_model=None, kl_coef=0.1):
+        """
+        Compute loss with proper gradient tracking and KL divergence regularization.
+
+        Args:
+            agent (PreTrainedModel): The agent model.
+            completions_data (dict): The completions data from _generate_completions.
+            rewards (List[float]): The rewards for each completion.
+            old_model (PreTrainedModel, optional): The old model state for KL calculation.
+            kl_coef (float): Coefficient for KL penalty term.
+
+        Returns:
+            torch.Tensor: The computed loss with gradients attached.
+        """
+        device = agent.device
+
+        # Base loss calculation - similar to _compute_loss_with_gradients
+        # Make sure we have the correct number of rewards
+        if len(rewards) == 0:
+            self.logger.warning("No rewards provided for loss computation")
+            return torch.tensor(0.0, device=device, requires_grad=True)
+
+        # Convert rewards to tensor
+        rewards_tensor = torch.tensor(rewards, dtype=torch.float, device=device)
+
+        # Use baseline approach
+        rewards_baseline = rewards_tensor.mean()  # Use mean as baseline
+        advantages = rewards_tensor - rewards_baseline  # Compute advantages
+
+        # Clip advantages to reasonable range to prevent numerical instability
+        advantages = torch.clamp(advantages, min=-10.0, max=10.0)
+
+        # Set agent to train mode to ensure gradients are tracked
+        agent.train()
+
+        prompt_input_ids = completions_data["prompt_input_ids"]
+        prompt_attention_mask = completions_data["prompt_attention_mask"]
+        completion_input_ids = completions_data["completion_input_ids"]
+
+        # Initialize policy gradient loss
+        pg_loss = torch.tensor(0.0, device=device, requires_grad=True)
+        # Initialize KL loss
+        kl_loss = torch.tensor(0.0, device=device, requires_grad=True)
+        num_samples = 0
+
+        # Process each prompt in the batch
+        for batch_idx in range(len(prompt_input_ids)):
+            prompt_ids = prompt_input_ids[batch_idx]
+            prompt_mask = prompt_attention_mask[batch_idx]
+
+            # Process each generated completion for this prompt
+            for seq_idx, completion_tokens in enumerate(completion_input_ids[batch_idx]):
+                # Break if we've processed enough completions for the available rewards
+                if seq_idx >= len(advantages):
+                    break
+
+                advantage = advantages[seq_idx]
+
+                # Process only if we have completion tokens
+                if len(completion_tokens) > 0:
+                    input_ids = torch.cat([prompt_ids, completion_tokens[:-1]])
+                    target_ids = completion_tokens
+                    attention_mask = torch.ones(len(input_ids), device=device)
+
+                    # Get current policy distribution
+                    outputs = agent(
+                        input_ids=input_ids.unsqueeze(0),
+                        attention_mask=attention_mask.unsqueeze(0),
+                    )
+                    current_logits = outputs.logits[0, prompt_ids.size(0) - 1:-1, :]
+
+                    # Calculate log probabilities for policy gradient
+                    log_probs = []
+                    for i, token_id in enumerate(target_ids):
+                        if i < current_logits.size(0):
+                            token_logits = current_logits[i]
+                            token_log_prob = torch.log_softmax(token_logits, dim=-1)[token_id]
+                            log_probs.append(token_log_prob)
+
+                    # Calculate policy gradient loss component
+                    if log_probs:
+                        sequence_log_prob = torch.stack(log_probs).sum()
+                        # Policy gradient loss: -log_prob * advantage
+                        pg_loss = pg_loss - sequence_log_prob * advantage
+                        num_samples += 1
+
+                    # Add KL divergence term if old_model is provided
+                    if old_model is not None:
+                        old_model.eval()
+                        with torch.no_grad():  # No gradients for old model
+                            old_outputs = old_model(
+                                input_ids=input_ids.unsqueeze(0),
+                                attention_mask=attention_mask.unsqueeze(0),
+                            )
+                            old_logits = old_outputs.logits[0, prompt_ids.size(0) - 1:-1, :]
+
+                        # Calculate KL divergence at each token position
+                        for i in range(min(old_logits.size(0), current_logits.size(0))):
+                            old_probs = torch.softmax(old_logits[i], dim=-1)
+                            current_probs = torch.softmax(current_logits[i], dim=-1)
+                            # Small epsilon to prevent log(0)
+                            eps = 1e-8
+                            # KL divergence: sum(p_old * log(p_old / p_new))
+                            token_kl = torch.sum(
+                                old_probs * (torch.log(old_probs + eps) - torch.log(current_probs + eps)))
+                            kl_loss = kl_loss + token_kl
+
+        # Average the loss components
+        if num_samples > 0:
+            pg_loss = pg_loss / num_samples
+            if old_model is not None:
+                kl_loss = kl_loss / num_samples
+
+        # Total loss with KL penalty
+        total_loss = pg_loss
+        if old_model is not None:
+            total_loss = total_loss + kl_coef * kl_loss
+
+            # Log KL loss to wandb if enabled
+            if self.wandb_initialized:
+                wandb.log({
+                    "pg_loss": pg_loss.item(),
+                    "kl_loss": kl_loss.item(),
+                    "kl_penalty": (kl_coef * kl_loss).item()
+                })
+
+        # Safety check for invalid loss values
+        if torch.isnan(total_loss) or torch.isinf(total_loss):
+            self.logger.warning(f"Invalid loss detected: {total_loss}, using default loss")
+            return torch.tensor(0.1, device=device, requires_grad=True)
+
+        return total_loss
 
     def _log_training_progress(self, epoch, batch_idx, rewards):
-        """Log training progress."""
+        """
+        Log training progress.
+
+        Args:
+            epoch (int): Current epoch.
+            batch_idx (int): Current batch index.
+            rewards (List[float]): Rewards for the current batch.
+        """
         avg_reward = sum(rewards) / len(rewards) if rewards else 0
-        self.log({
+        metrics = {
             "epoch": epoch,
             "batch": batch_idx,
             "average_reward": avg_reward,
-        })
+            "min_reward": min(rewards) if rewards else 0,
+            "max_reward": max(rewards) if rewards else 0,
+        }
+
+        self.logger.info(f"Training progress: {metrics}")
 
     def _save_checkpoints(self, epoch, batch_idx):
-        """Save model checkpoints."""
+        """
+        Save model checkpoints.
+
+        Args:
+            epoch (int): Current epoch.
+            batch_idx (int): Current batch index.
+        """
+        output_dir = self.args.output_dir
+        if not output_dir:
+            self.logger.warning("Output directory not specified. Skipping checkpoint saving.")
+            return
+
+        os.makedirs(output_dir, exist_ok=True)
+
         for agent_idx, agent in enumerate(self.agents):
-            output_dir = f"{self.args.output_dir}/agent_{agent_idx}/epoch_{epoch}_batch_{batch_idx}"
-            agent.save_pretrained(output_dir)
-            self.tokenizer.save_pretrained(output_dir)
+            agent_dir = f"{output_dir}/agent_{agent_idx}/epoch_{epoch}_batch_{batch_idx}"
+            os.makedirs(agent_dir, exist_ok=True)
+
+            # Save agent state
+            agent.save_pretrained(agent_dir)
+
+            # Save tokenizer if available
+            if self.tokenizer:
+                self.tokenizer.save_pretrained(agent_dir)
+
+            # Save optimizer state
+            torch.save(self.optimizers[agent_idx].state_dict(),
+                       f"{agent_dir}/optimizer.pt")
+
+        self.logger.info(f"Checkpoint saved at epoch {epoch}, batch {batch_idx}")
+
+        # Log model checkpoint saving to wandb
+        if self.wandb_initialized:
+            wandb.log({
+                "saved_checkpoint": f"epoch_{epoch}_batch_{batch_idx}"
+            })
+
+    def _load_from_checkpoint(self, checkpoint_dir):
+        """
+        Load models and training state from checkpoint.
+
+        Args:
+            checkpoint_dir (str): Path to the checkpoint directory.
+
+        Returns:
+            int: The epoch to resume from.
+        """
+        # Extract epoch from checkpoint path
+        import re
+        epoch_match = re.search(r'epoch_(\d+)', checkpoint_dir)
+        epoch = int(epoch_match.group(1)) if epoch_match else 0
+
+        for agent_idx, agent in enumerate(self.agents):
+            agent_dir = f"{checkpoint_dir}/agent_{agent_idx}"
+
+            # Load model weights
+            agent.load_state_dict(torch.load(f"{agent_dir}/pytorch_model.bin"))
+
+            # Load optimizer state
+            optimizer_path = f"{agent_dir}/optimizer.pt"
+            if os.path.exists(optimizer_path):
+                self.optimizers[agent_idx].load_state_dict(torch.load(optimizer_path))
+
+        self.logger.info(f"Resumed training from checkpoint: {checkpoint_dir}")
+        return epoch + 1  # Resume from next epoch
 
     def save_model(self, output_dir):
-        """Save the final trained models."""
+        """
+        Save the final trained models.
+
+        Args:
+            output_dir (str): Directory to save the models to.
+        """
+        os.makedirs(output_dir, exist_ok=True)
+
         for agent_idx, agent in enumerate(self.agents):
             agent_dir = f"{output_dir}/agent_{agent_idx}"
-            agent.save_pretrained(agent_dir)
-            self.tokenizer.save_pretrained(agent_dir)
+            os.makedirs(agent_dir, exist_ok=True)
 
-        print(f"All agent models saved to {output_dir}")
+            agent.save_pretrained(agent_dir)
+
+            if self.tokenizer:
+                self.tokenizer.save_pretrained(agent_dir)
+
+        self.logger.info(f"All agent models saved to {output_dir}")
+
+        # Log final model saving to wandb
+        if self.wandb_initialized:
+            wandb.log({
+                "final_model_saved": output_dir
+            })
+
+            # Log model differences - e.g. how much did the agents diverge?
+            if self.num_agents >= 2:
+                # Sample a short fixed prompt to compare agent outputs
+                sample_prompt = "Write a short response to the following: Hello, how are you?"
+                sample_outputs = []
+
+                # Generate a sample output from each agent
+                for agent_idx, agent in enumerate(self.agents):
+                    agent.eval()
+                    with torch.no_grad():
+                        inputs = self.tokenizer(sample_prompt, return_tensors="pt").to(agent.device)
+                        output = agent.generate(
+                            **inputs,
+                            max_length=50,
+                            do_sample=True,
+                            temperature=0.7
+                        )
+                        decoded = self.tokenizer.decode(output[0], skip_special_tokens=True)
+                        sample_outputs.append(decoded)
+
+                # Log the sample outputs
+                for agent_idx, output in enumerate(sample_outputs):
+                    wandb.log({
+                        f"final_agent{agent_idx + 1}_sample_output": output
+                    })
+
+# Define a simple external reward function
+def length_ratio_reward(completions1, completions2):
+    """Example reward function that rewards based on length ratio between agent outputs"""
+    rewards = []
+    for c1, c2 in zip(completions1, completions2):
+        len1, len2 = len(c1.split()), len(c2.split())
+        # Reward based on the ratio of lengths
+        ratio = max(len1, len2) / (min(len1, len2) + 1) if min(len1, len2) > 0 else 0
+        rewards.append(float(ratio))
+    return rewards
+
+
+
+# Updated example_usage function with wandb configuration
+def example_usage():
+    # Create and use the trainer
+    from transformers import AutoTokenizer, AutoModelForCausalLM
+
+    model_name = "Qwen/Qwen2.5-0.5B"  # Example model name
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model = AutoModelForCausalLM.from_pretrained(model_name)
+
+    # Configure MAGRPO
+    config = MAGRPOConfig(
+        output_dir="./magrpo_output",
+        num_train_epochs=100,
+        per_device_train_batch_size=4,
+        learning_rate=5e-5,
+        logging_steps=10,
+        save_steps=100,
+        num_generations=8,  # Number of completions per prompt
+        max_completion_length=100,
+    )
+
+    # Create a simple dataset
+    from datasets import Dataset
+    train_data = {
+        "prompt": [
+                      "Write a story about a robot:",
+                      "Explain quantum physics:",
+                      "Create a recipe for chocolate cake:",
+                      "Write a song about snow:",
+                  ] * 10,
+
+    }
+    train_dataset = Dataset.from_dict(train_data)
+
+    # # Use tldr Dataset
+    # from datasets import load_dataset
+    # dataset_name = "trl-lib/tldr"
+    # dataset_split = "train[:8]"
+    # train_dataset = load_dataset(dataset_name, split=dataset_split)
+
+    # Configure wandb
+    wandb_config = {
+        "project": "trl",
+        "entity": "nu-llpr",
+        "name": "test-magrpo-length-ratio-reward",
+    }
+
+    # Initialize and train
+    trainer = MAGRPOTrainer(
+        model=model,
+        num_agents=2,
+        reward_funcs=length_ratio_reward,  # External reward function
+        args=config,
+        train_dataset=train_dataset,
+        tokenizer=tokenizer,
+        wandb_config=wandb_config,  # Add wandb config
+    )
+
+    trainer.train()
+
+
+if __name__ == "__main__":
+    example_usage()
