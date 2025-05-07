@@ -504,12 +504,14 @@ class MAGRPOTrainer:
                     completion1 = completions_list[0][i]
                     completion2 = completions_list[1][i]
 
+                    len1 = len(completion1)
+                    len2 = len(completion2)
                     # Log completion lengths for debugging
                     if self.wandb_initialized and i == 0:  # Just log the first pair
                         wandb.log({
-                            "agent1_completion_length": len(completion1),
-                            "agent2_completion_length": len(completion2),
-                            "length_ratio": len(completion2) / len(completion1) if len(completion1) > 0 else 0
+                            "agent1_completion_length": len1,
+                            "agent2_completion_length": len2,
+                            "length_ratio": len2 / len1 if len1 > 0 else 0,
                         })
 
                     # Call the reward function for this pair
@@ -913,28 +915,10 @@ def length_ratio_reward(completions1, completions2):
     """Example reward function that rewards based on length ratio between agent outputs"""
     rewards = []
     for c1, c2 in zip(completions1, completions2):
-        len1, len2 = len(c1.split()), len(c2.split())
+        len1, len2 = len(c1), len(c2)
         # Reward based on the ratio of lengths
-        ratio = max(len1, len2) / (min(len1, len2) + 1) if min(len1, len2) > 0 else 0
+        ratio = max(len1, len2) / min(len1, len2) + 1 if min(len1, len2) > 0 else 0
         rewards.append(float(ratio))
-    return rewards
-
-
-def diversity_ratio_reward(completions1, completions2):
-    rewards = []
-    for c1, c2 in zip(completions1, completions2):
-        # Simple lexical diversity - count unique words
-        words1 = set(c1.lower().split())
-        words2 = set(c2.lower().split())
-
-        # Measure word overlap (lower means more diverse)
-        common_words = words1.intersection(words2)
-        unique_words = words1.union(words2)
-
-        # Calculate diversity ratio (higher means more diverse)
-        diversity_ratio = len(unique_words) / (len(common_words) + 1) if len(common_words) > 0 else 10.
-        rewards.append(float(diversity_ratio))
-
     return rewards
 
 # Updated example_usage function with wandb configuration
