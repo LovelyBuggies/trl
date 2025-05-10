@@ -35,41 +35,68 @@ class MAGRPOTrainer:
 
     def __init__(
             self,
-            model: Union[str, PreTrainedModel],
-            num_agents: int,
-            reward_funcs: Union[RewardFunc, List[RewardFunc]],
+            model: Optional[Union[str, PreTrainedModel]] = None,
+            agents: Optional[List[PreTrainedModel]] = None,
+            num_agents: int = 2,
+            reward_funcs: Union[RewardFunc, List[RewardFunc]] = None,
             args: Optional[MAGRPOConfig] = None,
             train_dataset: Optional[Union[Dataset, IterableDataset]] = None,
             tokenizer: Optional[PreTrainedTokenizerBase] = None,
             wandb_config: Optional[Dict[str, Any]] = None,
     ):
-        self.num_agents = num_agents
-        if self.num_agents < 2:
-            raise ValueError("MAGRPO requires at least 2 agents for training.")
+        # Validate inputs
+        if model is None and agents is None:
+            raise ValueError("Either model or agents must be provided")
+        if model is not None and agents is not None:
+            raise ValueError("Cannot provide both model and agents parameters")
+
+        # Set up reward functions and args
         self.reward_funcs = reward_funcs
         self.args = args if args is not None else MAGRPOConfig()
+
+        # Initialize agents
+        if agents is not None:
+            # Use pre-created agents
+            self.agents = agents
+            self.num_agents = len(agents)
+            # Set model_name based on the first agent
+            if hasattr(agents[0], 'base_model') and hasattr(agents[0].base_model, 'config') and hasattr(
+                    agents[0].base_model.config, 'model_type'):
+                # For PEFT models
+                self.model_name = agents[0].base_model.config.model_type
+            else:
+                # For regular models
+                self.model_name = agents[0].__class__.__name__
+        else:
+            # Create agents from model
+            self.num_agents = num_agents
+
+            if isinstance(model, str):
+                # Create agents from model name
+                from transformers import AutoModelForCausalLM
+                self.agents = [AutoModelForCausalLM.from_pretrained(model) for _ in range(num_agents)]
+                self.model_name = model
+            else:
+                # Create TRUE deep copies of the model for each agent
+                import copy
+                self.agents = []
+                self.model_name = model.__class__.__name__
+                for _ in range(num_agents):
+                    # Create a new instance with the same configuration
+                    agent_copy = type(model)(model.config)
+                    # Copy the state dictionary to transfer parameters
+                    agent_copy.load_state_dict(copy.deepcopy(model.state_dict()))
+                    self.agents.append(agent_copy)
+
+        # Validate agents
+        if self.num_agents < 2:
+            raise ValueError("MAGRPO requires at least 2 agents for training.")
         if self.args.num_generations < 2:
             raise ValueError("MAGRPO requires num_generations to be at least 2 for multi-agent training.")
 
+        # Set up dataset and tokenizer
         self.train_dataset = train_dataset
         self.tokenizer = tokenizer
-
-        # Initialize agents - homogenous agents all based on the same model
-        if isinstance(model, str):
-            from transformers import AutoModelForCausalLM
-            self.agents = [AutoModelForCausalLM.from_pretrained(model) for _ in range(num_agents)]
-            self.model_name = model
-        else:
-            # Create TRUE deep copies of the model for each agent
-            import copy
-            self.agents = []
-            self.model_name = model.__class__.__name__
-            for _ in range(num_agents):
-                # Create a new instance with the same configuration
-                agent_copy = type(model)(model.config)
-                # Copy the state dictionary to transfer parameters
-                agent_copy.load_state_dict(copy.deepcopy(model.state_dict()))
-                self.agents.append(agent_copy)
 
         # Set up logging
         self.logger = logging.getLogger(__name__)
@@ -108,7 +135,7 @@ class MAGRPOTrainer:
                 "num_train_epochs": self.args.num_train_epochs,
                 "per_device_train_batch_size": self.args.per_device_train_batch_size,
                 "num_generations": self.args.num_generations,
-                "max_completion_length": self.args.max_completion_length,
+                "max_new_tokens": self.args.max_new_tokens,  # Changed from max_completion_length
             }
 
             # Initialize wandb
@@ -201,7 +228,7 @@ class MAGRPOTrainer:
                                 self.agents[agent_idx],
                                 [prompt],  # Pass as a single-item list
                                 num_return_sequences=self.args.num_generations,
-                                max_length=self.args.max_completion_length,
+                                max_new_tokens=self.args.max_new_tokens,  # Changed from max_completion_length
                                 **kwargs
                             )
                             all_completions.append(agent_completions)
@@ -295,7 +322,8 @@ class MAGRPOTrainer:
         if self.wandb_initialized:
             wandb.finish()
 
-    def _generate_completions(self, agent, prompts, num_return_sequences=1, max_length=128, **kwargs):
+    # 1. In the _generate_completions method, change max_length to max_new_tokens
+    def _generate_completions(self, agent, prompts, num_return_sequences=1, max_new_tokens=128, **kwargs):
         """
         Generate completions from an agent given prompts, preserving model state.
 
@@ -303,7 +331,7 @@ class MAGRPOTrainer:
             agent (PreTrainedModel): The agent model to generate completions.
             prompts (List[str]): List of prompts to generate completions for.
             num_return_sequences (int, optional): Number of completions to generate per prompt.
-            max_length (int, optional): Maximum length of the generated completions.
+            max_new_tokens (int, optional): Maximum number of new tokens to generate.
             **kwargs: Additional arguments to pass to the model during generation.
 
         Returns:
@@ -343,11 +371,11 @@ class MAGRPOTrainer:
         # Generate completions without gradients
         generation_output = None
         try:
-            # Add beam search parameters when num_return_sequences > 1
+            # Use max_new_tokens instead of max_length
             generation_kwargs = {
                 "input_ids": prompt_input_ids,
                 "attention_mask": prompt_attention_mask,
-                "max_length": max_length,
+                "max_new_tokens": max_new_tokens,  # Changed from max_length
                 "output_scores": True,
                 "return_dict_in_generate": True,
             }
@@ -511,7 +539,8 @@ class MAGRPOTrainer:
                         wandb.log({
                             "agent1_completion_length": len1,
                             "agent2_completion_length": len2,
-                            "length_ratio": max(len1, len2) / min(len1, len2) + 1 if min(len1, len2) > 0 else -10
+                            "max_min_len_ratio": max(len1, len2) / min(len1, len2) if min(len1, len2) > 0 else max(len1, len2),
+                            "agent_2_1_len_ratio": len2 / len1 if len1 > 0 else len2,
                         })
 
                     # Call the reward function for this pair
@@ -917,69 +946,84 @@ def length_ratio_reward(completions1, completions2):
     for c1, c2 in zip(completions1, completions2):
         len1, len2 = len(c1), len(c2)
         # Reward based on the ratio of lengths
-        ratio = max(len1, len2) / min(len1, len2) + 1 if min(len1, len2) > 0 else -10
+        ratio = max(len1, len2) / min(len1, len2) if min(len1, len2) > 0 else max(len1, len2)
         rewards.append(float(ratio))
     return rewards
 
-# Updated example_usage function with wandb configuration
+
 def example_usage():
-    # Create and use the trainer
     from transformers import AutoTokenizer, AutoModelForCausalLM
+    from peft import LoraConfig, get_peft_model, TaskType
 
-    model_name = "Qwen/Qwen2.5-0.5B"  # Example model name
+    # 1. Load tokenizer
+    model_name = "Qwen/Qwen2.5-0.5B"
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = AutoModelForCausalLM.from_pretrained(model_name)
 
-    # Configure MAGRPO
+    # 2. Configure MAGRPO
     config = MAGRPOConfig(
-        output_dir="./magrpo_output",
+        output_dir="./magrpo_lora_output",
         num_train_epochs=50,
         per_device_train_batch_size=4,
         learning_rate=5e-5,
         logging_steps=10,
         save_steps=100,
-        num_generations=8,  # Number of completions per prompt
-        max_completion_length=100,
+        num_generations=8,
+        max_new_tokens=100,
     )
 
-    # Create a simple dataset
+    # 3. Create dataset
     from datasets import Dataset
-    train_data = {
-        "prompt": [
-                      "Write a story about a robot:",
-                      "Explain quantum physics:",
-                      "Create a recipe for chocolate cake:",
-                      "Write a song about snow:",
-                  ] * 10,
-
-    }
+    train_data = {"prompt": ["Write a story about a robot:", "Explain quantum physics:",
+                             "Create a recipe for chocolate cake:", "Write a song about snow:"] * 10}
     train_dataset = Dataset.from_dict(train_data)
 
-    # # Use tldr Dataset
-    # from datasets import load_dataset
-    # dataset_name = "trl-lib/tldr"
-    # dataset_split = "train[:8]"
-    # train_dataset = load_dataset(dataset_name, split=dataset_split)
-
-    # Configure wandb
+    # 4. Configure wandb
     wandb_config = {
         "project": "trl",
         "entity": "nu-llpr",
-        "name": "test-magrpo-length-ratio-reward",
+        "name": "qwen2.5-0.5B-lora-magrpo",
     }
 
-    # Initialize and train
+    # 5. Configure LoRA
+    lora_config = LoraConfig(
+        r=64,  # Increased rank for better capacity/expressivity
+        lora_alpha=128,  # Increased alpha to maintain same alpha/r ratio (2:1)
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],  # More modules
+        lora_dropout=0.1,  # Slightly higher dropout for better regularization
+        bias="none",  # Keep bias fixed to prevent overfitting
+        modules_to_save=["embed_tokens", "lm_head"],  # Tune embedding and output layers
+        fan_in_fan_out=False,  # Set appropriately based on model architecture
+        task_type=TaskType.CAUSAL_LM
+    )
+
+    # 6. Create agents list with two independent LoRA models
+    agents = []
+    for _ in range(2):
+        # Load a fresh model instance each time
+        base_model = AutoModelForCausalLM.from_pretrained(model_name)
+        # Apply LoRA to it
+        lora_model = get_peft_model(base_model, lora_config)
+        lora_model.print_trainable_parameters()
+        agents.append(lora_model)
+
+    # 7. Initialize trainer with our pre-created agents
     trainer = MAGRPOTrainer(
-        model=model,
-        num_agents=2,
-        reward_funcs=length_ratio_reward,  # External reward function
+        agents=agents,  # Pass our pre-created LoRA models
+        reward_funcs=length_ratio_reward,
         args=config,
         train_dataset=train_dataset,
         tokenizer=tokenizer,
-        wandb_config=wandb_config,  # Add wandb config
+        wandb_config=wandb_config,
     )
 
+    # 8. Train
     trainer.train()
+
+    # 9. Save models
+    for i, agent in enumerate(trainer.agents):
+        agent.save_pretrained(f"{config.output_dir}/final_lora_agent_{i}")
+    tokenizer.save_pretrained(f"{config.output_dir}/tokenizer")
+    print("Training complete!")
 
 
 if __name__ == "__main__":

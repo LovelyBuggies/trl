@@ -52,7 +52,7 @@ class MAGRPOConfig(TrainingArguments):
         num_generations (`int` or `None`, *optional*, defaults to `8`):
             Number of generations per prompt to sample. The effective batch size (num_processes *
             per_device_batch_size * gradient_accumulation_steps) must be evenly divisible by this value.
-        max_completion_length (`int` or `None`, *optional*, defaults to `256`):
+        max_new_tokens (`int` or `None`, *optional*, defaults to `256`):
             Maximum length of the generated completion.
         ds3_gather_for_generation (`bool`, *optional*, defaults to `True`):
             This setting applies to DeepSpeed ZeRO-3. If enabled, the policy model weights are gathered for generation,
@@ -233,9 +233,9 @@ class MAGRPOConfig(TrainingArguments):
             "* gradient_accumulation_steps) must be evenly divisible by this value."
         },
     )
-    max_completion_length: Optional[int] = field(
+    max_new_tokens: Optional[int] = field(
         default=256,
-        metadata={"help": "Maximum length of the generated completion."},
+        metadata={"help": "Maximum number of new tokens to generate after the prompt."},
     )
     ds3_gather_for_generation: bool = field(
         default=True,
@@ -398,16 +398,16 @@ class MAGRPOConfig(TrainingArguments):
         default="bnpo",
         metadata={
             "help": "Specifies the loss formulation to use. Supported values are `grpo`, `bnpo`, and `dr_grpo`. "
-            "`'grpo'`: Aggregates token-level losses by normalizing over sequence length. Not recommended due to "
-            "length bias—this approach tends to prefer shorter completions with positive advantages and longer ones "
-            "with negative advantages. "
-            "`'bnpo'`: Aggregates token-level losses by normalizing number of active token in the local batch. "
-            "Note that normalization is performed over the local batch only, so results may slightly vary depending "
-            "on the local batch size, despite a constant effective batch size. When using "
-            "`per_device_train_batch_size==1`, the loss is equivalent to the GRPO loss. "
-            "`'dr_grpo'`: Aggregates token-level losses by normalizing with a global constant. This method was "
-            "introduced in the Dr. GRPO paper to eliminate length bias. The value of the constant corresponds to "
-            "`max_completion_length`."
+                    "`'grpo'`: Aggregates token-level losses by normalizing over sequence length. Not recommended due to "
+                    "length bias—this approach tends to prefer shorter completions with positive advantages and longer ones "
+                    "with negative advantages. "
+                    "`'bnpo'`: Aggregates token-level losses by normalizing number of active token in the local batch. "
+                    "Note that normalization is performed over the local batch only, so results may slightly vary depending "
+                    "on the local batch size, despite a constant effective batch size. When using "
+                    "`per_device_train_batch_size==1`, the loss is equivalent to the GRPO loss. "
+                    "`'dr_grpo'`: Aggregates token-level losses by normalizing with a global constant. This method was "
+                    "introduced in the Dr. GRPO paper to eliminate length bias. The value of the constant corresponds to "
+                    "`max_new_tokens`."
         },
     )
     mask_truncated_completions: bool = field(
