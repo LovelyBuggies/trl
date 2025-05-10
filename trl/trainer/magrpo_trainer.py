@@ -44,6 +44,8 @@ class MAGRPOTrainer:
             wandb_config: Optional[Dict[str, Any]] = None,
     ):
         self.num_agents = num_agents
+        if self.num_agents < 2:
+            raise ValueError("MAGRPO requires at least 2 agents for training.")
         self.reward_funcs = reward_funcs
         self.args = args if args is not None else MAGRPOConfig()
         if self.args.num_generations < 2:
@@ -214,12 +216,10 @@ class MAGRPOTrainer:
                         epoch_rewards.extend(rewards)
 
                         # Track rewards per agent for more detailed logging
-                        if self.num_agents == 2:  # For the specific case of two agents
-                            # In this implementation, rewards measure the ratio of agent2's output to agent1's
-                            # So agent1's reward would be negative of agent2's reward
-                            for i, reward in enumerate(rewards):
-                                epoch_agent_rewards[0].append(-reward)  # Agent 1 wants shorter outputs
-                                epoch_agent_rewards[1].append(reward)  # Agent 2 wants longer outputs
+                        for agent_idx in range(self.num_agents):
+                            for reward in rewards:
+                                epoch_agent_rewards[agent_idx].append(reward)
+                                epoch_agent_rewards[agent_idx].append(reward)
 
                         # Update each agent using the rewards with proper gradient tracking
                         batch_loss = 0.0
@@ -229,7 +229,7 @@ class MAGRPOTrainer:
                             agent_loss = self._compute_loss_with_gradients(
                                 self.agents[agent_idx],
                                 all_completions[agent_idx],
-                                rewards if agent_idx == 1 else [-r for r in rewards]  # Invert rewards for agent1
+                                rewards  # Invert rewards for agent1
                             )
 
                             # Backward pass and optimization
@@ -511,7 +511,7 @@ class MAGRPOTrainer:
                         wandb.log({
                             "agent1_completion_length": len1,
                             "agent2_completion_length": len2,
-                            "length_ratio": len2 / len1 if len1 > 0 else 0,
+                            "length_ratio": max(len1, len2) / min(len1, len2) + 1 if min(len1, len2) > 0 else -10
                         })
 
                     # Call the reward function for this pair
@@ -917,7 +917,7 @@ def length_ratio_reward(completions1, completions2):
     for c1, c2 in zip(completions1, completions2):
         len1, len2 = len(c1), len(c2)
         # Reward based on the ratio of lengths
-        ratio = max(len1, len2) / min(len1, len2) + 1 if min(len1, len2) > 0 else 0
+        ratio = max(len1, len2) / min(len1, len2) + 1 if min(len1, len2) > 0 else -10
         rewards.append(float(ratio))
     return rewards
 
