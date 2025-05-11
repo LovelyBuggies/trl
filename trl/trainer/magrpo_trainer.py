@@ -216,7 +216,7 @@ class MAGRPOTrainer:
                 if isinstance(batch, list) and all(isinstance(item, dict) for item in batch):
                     # Process each prompt separately - this is the expected format
                     for prompt_idx, prompt_item in enumerate(batch):
-                        prompt = prompt_item["prompt"][:120]
+                        prompt = prompt_item["prompt"]
 
                         # Generate completions from each agent for this single prompt
                         all_completions = []
@@ -1004,13 +1004,13 @@ def example_usage():
     # Configure MAGRPO
     config = MAGRPOConfig(
         output_dir="./magrpo_lora_output",
-        num_train_epochs=5,
+        num_train_epochs=10,
         per_device_train_batch_size=4,
         learning_rate=5e-5,
         logging_steps=10,
         save_steps=100,
         num_generations=8,
-        max_new_tokens=100,
+        max_new_tokens=512,
     )
 
     # Create dataset
@@ -1063,7 +1063,7 @@ def example_usage():
     # train_dataset = Dataset.from_dict(train_data)
 
     dataset_name = "trl-lib/tldr"
-    dataset_split = "train[:100]"
+    dataset_split = "train[:1000]"
     train_dataset = load_dataset(dataset_name, split=dataset_split)
 
     # Configure wandb
