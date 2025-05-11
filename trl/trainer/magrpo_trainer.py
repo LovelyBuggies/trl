@@ -1063,7 +1063,7 @@ def example_usage():
     # train_dataset = Dataset.from_dict(train_data)
 
     dataset_name = "trl-lib/tldr"
-    dataset_split = "train[:1000]"
+    dataset_split = "train[:100]"
     train_dataset = load_dataset(dataset_name, split=dataset_split)
 
     # Configure wandb
