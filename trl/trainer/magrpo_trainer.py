@@ -1010,7 +1010,7 @@ def example_usage():
         logging_steps=10,
         save_steps=100,
         num_generations=8,
-        max_new_tokens=512,
+        max_new_tokens=256,
     )
 
     # Create dataset
