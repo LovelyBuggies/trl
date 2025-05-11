@@ -543,8 +543,8 @@ class MAGRPOTrainer:
 
                         # Add TTR metrics only if we have the calculator
                         if calculate_ttr:
-                            ttr1 = calculate_ttr(completion1)
-                            ttr2 = calculate_ttr(completion2)
+                            ttr1 = calculate_ttr(completion1, stopwords)
+                            ttr2 = calculate_ttr(completion2, stopwords)
                             log_data.update({
                                 "agent1_ttr": ttr1,
                                 "agent2_ttr": ttr2,
@@ -1024,7 +1024,7 @@ def vocabulary_richness_reward(completions1, completions2):
     """
     import math
 
-    def calculate_ttr(text, stopwords=None):
+    def calculate_ttr(text, stopwords):
         """Calculate Type-Token Ratio (TTR) excluding stopwords.
 
         Args:
@@ -1040,7 +1040,11 @@ def vocabulary_richness_reward(completions1, completions2):
         words = re.findall(r'\b\w+\b', text.lower())
 
         # Filter out stopwords
-        content_words = [word for word in words if word not in stopwords]
+        if not stopwords:
+            content_words = [word for word in words if word not in stopwords]
+        else:
+            content_words = words
+            print("No stopwords provided, using all words for TTR calculation.")
 
         # Calculate TTR (unique words / total words)
         if not content_words:
@@ -1059,8 +1063,8 @@ def vocabulary_richness_reward(completions1, completions2):
     rewards = []
     for c1, c2 in zip(completions1, completions2):
         # Calculate TTR for both completions
-        ttr1 = calculate_ttr(c1, stopwords=stopwords)
-        ttr2 = calculate_ttr(c2, stopwords=stopwords)
+        ttr1 = calculate_ttr(c1, stopwords)
+        ttr2 = calculate_ttr(c2, stopwords)
 
         # Handle edge cases
         if ttr1 == 0:
