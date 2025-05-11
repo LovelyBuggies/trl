@@ -18,6 +18,19 @@ import wandb  # Add wandb import
 RewardFunc = Union[str, PreTrainedModel, Callable[[List[str], List[str]], List[float]]]
 
 
+stopwords = set([
+        "a", "an", "the", "and", "but", "or", "if", "because", "as", "what",
+        "which", "this", "that", "these", "those", "then", "just", "so", "than",
+        "such", "when", "who", "how", "where", "why", "is", "am", "are", "was",
+        "were", "be", "been", "being", "have", "has", "had", "having", "do", "does",
+        "did", "doing", "to", "for", "with", "about", "against", "between", "into",
+        "through", "during", "before", "after", "above", "below", "from", "up",
+        "down", "in", "out", "on", "off", "over", "under", "again", "further",
+        "then", "once", "here", "there", "all", "any", "both", "each", "few",
+        "more", "most", "other", "some", "such", "no", "nor", "not", "only", "own",
+        "same", "so", "than", "too", "very", "can", "will", "should", "now", "of"
+    ])
+
 class MAGRPOTrainer:
     """
     Multi-Agent Group Relative Policy Optimization Trainer (MAGRPO).
@@ -566,8 +579,8 @@ class MAGRPOTrainer:
                 # Log TTR metrics for batch processing if applicable
                 if self.wandb_initialized and calculate_ttr and len(agent1_completions) > 0 and len(
                         agent2_completions) > 0:
-                    ttr1_values = [calculate_ttr(completion) for completion in agent1_completions]
-                    ttr2_values = [calculate_ttr(completion) for completion in agent2_completions]
+                    ttr1_values = [calculate_ttr(completion, stopwords) for completion in agent1_completions]
+                    ttr2_values = [calculate_ttr(completion, stopwords) for completion in agent2_completions]
 
                     avg_ttr1 = sum(ttr1_values) / len(ttr1_values)
                     avg_ttr2 = sum(ttr2_values) / len(ttr2_values)
@@ -1011,7 +1024,7 @@ def vocabulary_richness_reward(completions1, completions2):
     """
     import math
 
-    def calculate_ttr(text, stopwords):
+    def calculate_ttr(text, stopwords=None):
         """Calculate Type-Token Ratio (TTR) excluding stopwords.
 
         Args:
@@ -1041,24 +1054,13 @@ def vocabulary_richness_reward(completions1, completions2):
     vocabulary_richness_reward.calculate_ttr = calculate_ttr
 
     # Common English stopwords to exclude
-    stopwords = set([
-        "a", "an", "the", "and", "but", "or", "if", "because", "as", "what",
-        "which", "this", "that", "these", "those", "then", "just", "so", "than",
-        "such", "when", "who", "how", "where", "why", "is", "am", "are", "was",
-        "were", "be", "been", "being", "have", "has", "had", "having", "do", "does",
-        "did", "doing", "to", "for", "with", "about", "against", "between", "into",
-        "through", "during", "before", "after", "above", "below", "from", "up",
-        "down", "in", "out", "on", "off", "over", "under", "again", "further",
-        "then", "once", "here", "there", "all", "any", "both", "each", "few",
-        "more", "most", "other", "some", "such", "no", "nor", "not", "only", "own",
-        "same", "so", "than", "too", "very", "can", "will", "should", "now", "of"
-    ])
+
 
     rewards = []
     for c1, c2 in zip(completions1, completions2):
         # Calculate TTR for both completions
-        ttr1 = calculate_ttr(c1, stopwords)
-        ttr2 = calculate_ttr(c2, stopwords)
+        ttr1 = calculate_ttr(c1, stopwords=stopwords)
+        ttr2 = calculate_ttr(c2, stopwords=stopwords)
 
         # Handle edge cases
         if ttr1 == 0:
