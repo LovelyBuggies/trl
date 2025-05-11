@@ -1075,8 +1075,8 @@ def example_usage():
 
     # Configure LoRA
     lora_config = LoraConfig(
-        r=32,  # Increased rank for better capacity/expressivity
-        lora_alpha=64,  # Increased alpha to maintain same alpha/r ratio (2:1)
+        r=128,  # Increased rank for better capacity/expressivity
+        lora_alpha=256,  # Increased alpha to maintain same alpha/r ratio (2:1)
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],  # More modules
         lora_dropout=0.1,  # Slightly higher dropout for better regularization
         bias="none",  # Keep bias fixed to prevent overfitting
@@ -1098,9 +1098,9 @@ def example_usage():
     agents = []
     for _ in range(2):
         base_model = AutoModelForCausalLM.from_pretrained(model_name)
-        # lora_model = get_peft_model(base_model, lora_config)
-        # lora_model.print_trainable_parameters()
-        lora_model = base_model
+        lora_model = get_peft_model(base_model, lora_config)
+        lora_model.print_trainable_parameters()
+        # lora_model = base_model
         agents.append(lora_model)
 
     # Initialize trainer with our pre-created agents
