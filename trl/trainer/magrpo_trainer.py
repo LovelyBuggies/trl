@@ -1,5 +1,6 @@
+
 import torch
-from typing import Callable, List, Optional, Union, Dict, Any
+from typing import Callable, List, Optional, Union, Dict, Any, Tuple
 from datasets import Dataset, IterableDataset
 from transformers import (
     PreTrainedModel,
@@ -11,7 +12,7 @@ from trl import MAGRPOConfig
 import numpy as np
 import logging
 import os
-import wandb  # Add wandb import
+import wandb
 
 RewardFunc = Union[str, PreTrainedModel, Callable[[List[str], List[str]], List[float]]]
 
@@ -29,6 +30,136 @@ STOPWORDS = set([
         "same", "so", "than", "too", "very", "can", "will", "should", "now", "of"
     ])
 
+
+def length_ratio_reward(completions1, completions2):
+    """Example reward function that rewards based on length ratio between agent outputs"""
+    rewards = []
+    for c1, c2 in zip(completions1, completions2):
+        len1, len2 = len(c1), len(c2)
+        # Reward based on the ratio of lengths
+        ratio = max(len1, len2) / min(len1, len2) if min(len1, len2) > 0 else max(len1, len2)
+        rewards.append(float(ratio))
+    return rewards
+
+
+def proper_length_ratio_reward(completions1, completions2):
+    """Reward function that gives high reward when the second completion is 2-3 times longer than the first.
+
+    The maximum reward is given when the ratio is exactly in the target range (2-3x),
+    and gradually decreases as the ratio moves further from this range.
+    """
+    rewards = []
+    for c1, c2 in zip(completions1, completions2):
+        len1, len2 = len(c1), len(c2)
+
+        # Ensure we don't divide by zero
+        if len1 == 0:
+            rewards.append(0.0)  # No reward for empty first completion
+            continue
+
+        # Calculate the ratio of second to first completion
+        ratio = len2 / len1
+
+        # Define target range and calculate reward
+        target_min = 2.0
+        target_max = 3.0
+
+        if target_min <= ratio <= target_max:
+            # Maximum reward (1.0) when within the target range
+            reward = 1.0
+        else:
+            # Calculate distance from the nearest boundary of the target range
+            if ratio < target_min:
+                distance = target_min - ratio
+            else:  # ratio > target_max
+                distance = ratio - target_max
+
+            # Reward decreases as distance increases
+            # Using an exponential decay function: reward = e^(-distance)
+            import math
+            reward = math.exp(-distance)
+
+        rewards.append(float(reward))
+
+    return rewards
+
+
+def vocabulary_richness_reward(completions1, completions2):
+    """Reward function that gives high reward when the second completion has higher
+    vocabulary richness (Type-Token Ratio without stopwords) than the first.
+
+    The reward is based on the improvement in TTR from the first to the second completion.
+    Maximum reward is given when the second completion's TTR is substantially higher,
+    and gradually decreases as the improvement diminishes.
+    """
+    import math
+
+    def calculate_ttr(text, stopwords):
+        """Calculate Type-Token Ratio (TTR) excluding stopwords.
+
+        Args:
+            text: String text to analyze
+            stopwords: Set of stopwords to exclude
+
+        Returns:
+            Float value representing TTR (unique content words / total content words)
+        """
+        import re
+
+        # Tokenize by splitting on non-alphanumeric characters and convert to lowercase
+        words = re.findall(r'\b\w+\b', text.lower())
+
+        # Filter out stopwords
+        if stopwords:
+            content_words = [word for word in words if word not in stopwords]
+        else:
+            content_words = words
+
+        # Calculate TTR (unique words / total words)
+        if not content_words:
+            return 0.0
+
+        types = len(set(content_words))
+        tokens = len(content_words)
+
+        return types / tokens if tokens > 0 else 0.0
+
+    vocabulary_richness_reward.calculate_ttr = calculate_ttr
+    rewards = []
+    for c1, c2 in zip(completions1, completions2):
+        # Calculate TTR for both completions
+        ttr1 = calculate_ttr(c1, STOPWORDS)
+        ttr2 = calculate_ttr(c2, STOPWORDS)
+
+        # Handle edge cases
+        if ttr1 == 0:
+            if ttr2 > 0:
+                reward = 1.0  # Maximum reward if improvement from zero
+            else:
+                reward = 0.0  # No reward if both are zero
+        else:
+            # Calculate improvement ratio
+            improvement = ttr2 / ttr1
+
+            # Define target range for improvement
+            target_min = 1.2  # At least 20% improvement
+            target_max = 2.0  # Up to double the vocabulary richness
+
+            if improvement >= target_max:
+                reward = 1.0  # Maximum reward
+            elif improvement >= target_min:
+                # Linear scaling between min and max targets
+                reward = (improvement - target_min) / (target_max - target_min)
+            else:
+                # Exponential decay for below-target improvement
+                distance = target_min - improvement
+                reward = math.exp(-2 * distance)  # Steeper decay
+
+        rewards.append(float(reward))
+
+    return rewards
+
+
 class MAGRPOTrainer:
     """
     Multi-Agent Group Relative Policy Optimization Trainer (MAGRPO).
@@ -38,6 +169,8 @@ class MAGRPOTrainer:
         model (str or PreTrainedModel): The model to be trained for homogenous agents
         num_agents (int): The number of agents.
         reward_funcs (RewardFunc or list[RewardFunc]): The reward functions for all agents.
+        reward_weights (list[float], optional): The weights for each reward function.
+        reward_processors (list[Callable], optional): Processors to apply to rewards (e.g., scaling).
         args (MAGRPOConfig, optional): The training arguments. If not provided, default arguments will be used.
         train_dataset (Dataset or IterableDataset, optional): The training dataset. If not provided, the default
             dataset will be used.
@@ -50,6 +183,8 @@ class MAGRPOTrainer:
             agents: Optional[List[PreTrainedModel]] = None,
             num_agents: int = 2,
             reward_funcs: Union[RewardFunc, List[RewardFunc]] = None,
+            reward_weights: Optional[List[float]] = None,
+            reward_processors: Optional[List[Callable]] = None,
             args: Optional[MAGRPOConfig] = None,
             train_dataset: Optional[Union[Dataset, IterableDataset]] = None,
             tokenizer: Optional[PreTrainedTokenizerBase] = None,
@@ -61,8 +196,9 @@ class MAGRPOTrainer:
         if model is not None and agents is not None:
             raise ValueError("Cannot provide both model and agents parameters")
 
-        # Set up reward functions and args
-        self.reward_funcs = reward_funcs
+        # Set up reward functions
+        self._setup_reward_functions(reward_funcs, reward_weights, reward_processors)
+
         self.args = args if args is not None else MAGRPOConfig()
 
         # Initialize agents
@@ -125,6 +261,35 @@ class MAGRPOTrainer:
         if self.wandb_config is not None:
             self._init_wandb()
 
+    def _setup_reward_functions(self, reward_funcs, reward_weights=None, reward_processors=None):
+        """Set up reward functions with weights and processors."""
+        # Convert single reward function to list for uniform handling
+        if not isinstance(reward_funcs, list):
+            self.reward_funcs = [reward_funcs]
+        else:
+            self.reward_funcs = reward_funcs
+
+        # Set up reward weights (default to equal weights if not provided)
+        if reward_weights is None:
+            self.reward_weights = [1.0 / len(self.reward_funcs)] * len(self.reward_funcs)
+        else:
+            if len(reward_weights) != len(self.reward_funcs):
+                raise ValueError(f"Number of reward weights ({len(reward_weights)}) must match "
+                                 f"number of reward functions ({len(self.reward_funcs)})")
+            # Normalize weights to sum to 1
+            total = sum(reward_weights)
+            self.reward_weights = [w / total for w in reward_weights]
+
+        # Set up reward processors
+        if reward_processors is None:
+            # Default identity processor
+            self.reward_processors = [lambda x: x] * len(self.reward_funcs)
+        else:
+            if len(reward_processors) != len(self.reward_funcs):
+                raise ValueError(f"Number of reward processors ({len(reward_processors)}) must match "
+                                 f"number of reward functions ({len(self.reward_funcs)})")
+            self.reward_processors = reward_processors
+
     def _init_wandb(self):
         """Initialize Weights & Biases for tracking."""
         if not self.wandb_initialized:
@@ -141,12 +306,14 @@ class MAGRPOTrainer:
             config_dict = {
                 "model_name": self.model_name,
                 "num_agents": self.num_agents,
+                "num_reward_functions": len(self.reward_funcs),
+                "reward_weights": self.reward_weights,
                 "learning_rate": self.args.learning_rate,
                 "weight_decay": self.args.weight_decay,
                 "num_train_epochs": self.args.num_train_epochs,
                 "per_device_train_batch_size": self.args.per_device_train_batch_size,
                 "num_generations": self.args.num_generations,
-                "max_new_tokens": self.args.max_new_tokens,  # Changed from max_completion_length
+                "max_new_tokens": self.args.max_new_tokens,
             }
 
             # Initialize wandb
@@ -221,6 +388,8 @@ class MAGRPOTrainer:
             epoch_loss = 0.0
             epoch_rewards = []
             epoch_agent_rewards = [[] for _ in range(self.num_agents)]
+            # Track individual reward components
+            epoch_reward_components = [[] for _ in range(len(self.reward_funcs))]
 
             for batch_idx, batch in enumerate(self.get_train_dataloader()):
                 # If batch is already a list of dictionaries, we work with individual prompts
@@ -239,7 +408,7 @@ class MAGRPOTrainer:
                                 self.agents[agent_idx],
                                 [prompt],  # Pass as a single-item list
                                 num_return_sequences=self.args.num_generations,
-                                max_new_tokens=self.args.max_new_tokens,  # Changed from max_completion_length
+                                max_new_tokens=self.args.max_new_tokens,
                                 **kwargs
                             )
                             all_completions.append(agent_completions)
@@ -250,13 +419,16 @@ class MAGRPOTrainer:
                             agent_completions_list.append(all_completions[agent_idx]["completions"][0])
 
                         # Compute rewards based on all agents' completions for this prompt
-                        rewards = self._compute_rewards([prompt], agent_completions_list)
+                        rewards, reward_components = self._compute_rewards([prompt], agent_completions_list)
                         epoch_rewards.extend(rewards)
+
+                        # Track reward components
+                        for i, component in enumerate(reward_components):
+                            epoch_reward_components[i].extend(component)
 
                         # Track rewards per agent for more detailed logging
                         for agent_idx in range(self.num_agents):
                             for reward in rewards:
-                                epoch_agent_rewards[agent_idx].append(reward)
                                 epoch_agent_rewards[agent_idx].append(reward)
 
                         # Update each agent using the rewards with proper gradient tracking
@@ -267,7 +439,7 @@ class MAGRPOTrainer:
                             agent_loss = self._compute_loss_with_gradients(
                                 self.agents[agent_idx],
                                 all_completions[agent_idx],
-                                rewards  # Invert rewards for agent1
+                                rewards
                             )
 
                             # Backward pass and optimization
@@ -281,13 +453,22 @@ class MAGRPOTrainer:
 
                         # Log to wandb per batch
                         if self.wandb_initialized:
-                            wandb.log({
+                            log_data = {
                                 "batch_loss": batch_loss,
-                                "agent1_loss": agent_losses[0] if len(agent_losses) > 0 else 0,
-                                "agent2_loss": agent_losses[1] if len(agent_losses) > 1 else 0,
                                 "batch_rewards_mean": np.mean(rewards) if rewards else 0,
                                 "step": epoch * len(self.get_train_dataloader()) + batch_idx,
-                            })
+                            }
+
+                            # Log individual agent losses
+                            for i, loss in enumerate(agent_losses):
+                                log_data[f"agent{i + 1}_loss"] = loss
+
+                            # Log individual reward components
+                            for i, component in enumerate(reward_components):
+                                component_mean = np.mean(component) if component else 0
+                                log_data[f"reward_{i + 1}_mean"] = component_mean
+
+                            wandb.log(log_data)
 
                             # Log a sample of completions periodically
                             if batch_idx % 10 == 0 and rewards:
@@ -310,6 +491,8 @@ class MAGRPOTrainer:
             # Log epoch summary
             avg_reward = sum(epoch_rewards) / len(epoch_rewards) if epoch_rewards else 0
             avg_agent_rewards = [sum(rewards) / len(rewards) if rewards else 0 for rewards in epoch_agent_rewards]
+            # Calculate average reward components
+            avg_reward_components = [sum(comp) / len(comp) if comp else 0 for comp in epoch_reward_components]
 
             epoch_log = {
                 "epoch": epoch,
@@ -321,19 +504,31 @@ class MAGRPOTrainer:
             for i, avg_agent_reward in enumerate(avg_agent_rewards):
                 epoch_log[f"agent{i + 1}_avg_reward"] = avg_agent_reward
 
+            # Add component-specific reward tracking
+            for i, avg_component in enumerate(avg_reward_components):
+                epoch_log[f"reward_{i + 1}_avg"] = avg_component
+
             if self.wandb_initialized:
                 wandb.log(epoch_log)
 
-            self.logger.info(f"Epoch {epoch}: Loss={epoch_loss / len(self.get_train_dataloader())}, "
-                             f"Avg Reward={avg_reward}, "
-                             f"Agent1 Avg Reward={avg_agent_rewards[0]}, "
-                             f"Agent2 Avg Reward={avg_agent_rewards[1]}")
+            # Prepare log message
+            log_message = f"Epoch {epoch}: Loss={epoch_loss / len(self.get_train_dataloader())}, " \
+                          f"Avg Reward={avg_reward}"
+
+            # Add agent rewards to log message
+            for i, avg_agent_reward in enumerate(avg_agent_rewards):
+                log_message += f", Agent{i + 1} Avg Reward={avg_agent_reward}"
+
+            # Add component rewards to log message
+            for i, avg_component in enumerate(avg_reward_components):
+                log_message += f", Reward{i + 1} Avg={avg_component}"
+
+            self.logger.info(log_message)
 
         # Close wandb
         if self.wandb_initialized:
             wandb.finish()
 
-    # 1. In the _generate_completions method, change max_length to max_new_tokens
     def _generate_completions(self, agent, prompts, num_return_sequences=1, max_new_tokens=128, **kwargs):
         """
         Generate completions from an agent given prompts, preserving model state.
@@ -495,106 +690,186 @@ class MAGRPOTrainer:
             "logits": logits
         }
 
-    def _compute_rewards(self, prompts, completions_list):
-        """Compute rewards based on completions from agents, with TTR metrics logging when applicable."""
-        if self.num_agents == 2 and callable(self.reward_funcs):
+    def _compute_rewards(self, prompts, completions_list) -> Tuple[List[float], List[List[float]]]:
+        """
+        Compute combined rewards based on multiple reward functions, with weights.
 
-            # Only attempt to get TTR calculator if using vocabulary richness reward
-            calculate_ttr = None
-            if self.reward_funcs.__name__ == 'vocabulary_richness_reward':
-                # Get reference to the calculate_ttr function
-                # This assumes the reward function has this attribute set
-                calculate_ttr = getattr(self.reward_funcs, 'calculate_ttr', None)
+        Args:
+            prompts: List of prompts
+            completions_list: List of completions from each agent
 
-            # Single prompt with multiple generations per agent
-            if len(prompts) == 1:
-                # Ensure correct structure
-                if not isinstance(completions_list[0], list) or not isinstance(completions_list[1], list):
-                    self.logger.error(
-                        f"Expected lists of completions, got: {type(completions_list[0])}, {type(completions_list[1])}")
-                    completions_list = [
-                        [completions_list[0]] if not isinstance(completions_list[0], list) else completions_list[0],
-                        [completions_list[1]] if not isinstance(completions_list[1], list) else completions_list[1]
-                    ]
-
-                self.logger.info(
-                    f"Processing {len(completions_list[0])} completions from agent 1 and {len(completions_list[1])} from agent 2")
-
-                all_rewards = []
-                min_completions = min(len(completions_list[0]), len(completions_list[1]))
-
-                for i in range(min_completions):
-                    completion1 = completions_list[0][i]
-                    completion2 = completions_list[1][i]
-                    len1 = len(completion1)
-                    len2 = len(completion2)
-
-                    # Log metrics
-                    if self.wandb_initialized and i == 0:  # Just log the first pair
-                        log_data = {
-                            "agent1_completion_length": len1,
-                            "agent2_completion_length": len2,
-                            "max_min_len_ratio": max(len1, len2) / min(len1, len2) if min(len1, len2) > 0 else max(len1,
-                                                                                                                   len2),
-                            "agent_2_1_len_ratio": len2 / len1 if len1 > 0 else len2,
-                        }
-
-                        # Add TTR metrics only if we have the calculator
-                        if calculate_ttr:
-                            ttr1 = calculate_ttr(completion1, STOPWORDS)
-                            ttr2 = calculate_ttr(completion2, STOPWORDS)
-                            log_data.update({
-                                "agent1_ttr": ttr1,
-                                "agent2_ttr": ttr2,
-                                "ttr_ratio": ttr2 / ttr1 if ttr1 > 0 else float('inf'),
-                                "ttr_improvement": max(0, ttr2 - ttr1),
-                            })
-
-                        wandb.log(log_data)
-
-                    # Call reward function and collect rewards
-                    pair_reward = self.reward_funcs([completion1], [completion2])
-                    all_rewards.extend(pair_reward)
-
-                return all_rewards
-            else:
-                # Batch processing (multiple prompts)
-                agent1_completions = []
-                agent2_completions = []
-
-                # Extract completions
-                for prompt_idx in range(len(prompts)):
-                    if prompt_idx < len(completions_list[0]):
-                        agent1_completion = completions_list[0][prompt_idx][0] if isinstance(
-                            completions_list[0][prompt_idx], list) else completions_list[0][prompt_idx]
-                        agent1_completions.append(agent1_completion)
-
-                    if prompt_idx < len(completions_list[1]):
-                        agent2_completion = completions_list[1][prompt_idx][0] if isinstance(
-                            completions_list[1][prompt_idx], list) else completions_list[1][prompt_idx]
-                        agent2_completions.append(agent2_completion)
-
-                # Log TTR metrics for batch processing if applicable
-                if self.wandb_initialized and calculate_ttr and len(agent1_completions) > 0 and len(
-                        agent2_completions) > 0:
-                    ttr1_values = [calculate_ttr(completion, STOPWORDS) for completion in agent1_completions]
-                    ttr2_values = [calculate_ttr(completion, STOPWORDS) for completion in agent2_completions]
-
-                    avg_ttr1 = sum(ttr1_values) / len(ttr1_values)
-                    avg_ttr2 = sum(ttr2_values) / len(ttr2_values)
-
-                    wandb.log({
-                        "avg_agent1_ttr": avg_ttr1,
-                        "avg_agent2_ttr": avg_ttr2,
-                        "avg_ttr_ratio": avg_ttr2 / avg_ttr1 if avg_ttr1 > 0 else float('inf'),
-                    })
-
-                # Call the reward function
-                return self.reward_funcs(agent1_completions, agent2_completions)
-        else:
+        Returns:
+            Tuple containing:
+            - List of final weighted rewards
+            - List of individual reward components (for logging)
+        """
+        if self.num_agents != 2:
             raise NotImplementedError(
-                "Currently, only the case with 2 agents and a callable reward function is implemented."
+                "Currently, only the case with 2 agents is implemented."
             )
+
+        # Initialize lists to store rewards
+        all_rewards = []
+        all_reward_components = [[] for _ in range(len(self.reward_funcs))]
+
+        # Single prompt case
+        if len(prompts) == 1:
+            # Ensure correct structure
+            if not isinstance(completions_list[0], list) or not isinstance(completions_list[1], list):
+                self.logger.error(
+                    f"Expected lists of completions, got: {type(completions_list[0])}, {type(completions_list[1])}")
+                completions_list = [
+                    [completions_list[0]] if not isinstance(completions_list[0], list) else completions_list[0],
+                    [completions_list[1]] if not isinstance(completions_list[1], list) else completions_list[1]
+                ]
+
+            self.logger.info(
+                f"Processing {len(completions_list[0])} completions from agent 1 and {len(completions_list[1])} from agent 2")
+
+            min_completions = min(len(completions_list[0]), len(completions_list[1]))
+
+            for i in range(min_completions):
+                completion1 = completions_list[0][i]
+                completion2 = completions_list[1][i]
+
+                # Log metrics for the first pair if wandb is enabled
+                if self.wandb_initialized and i == 0:
+                    self._log_completion_metrics(completion1, completion2)
+
+                # Calculate rewards from each function and apply weights
+                weighted_reward = 0.0
+                reward_components = []
+
+                for func_idx, (reward_func, weight, processor) in enumerate(
+                        zip(self.reward_funcs, self.reward_weights, self.reward_processors)
+                ):
+                    # Call reward function for this pair
+                    pair_rewards = reward_func([completion1], [completion2])
+
+                    # Apply processor to rewards
+                    processed_rewards = [processor(r) for r in pair_rewards]
+
+                    # Store the raw component rewards for logging
+                    reward_components.append(processed_rewards[0])
+                    all_reward_components[func_idx].extend(processed_rewards)
+
+                    # Add weighted component to total reward
+                    weighted_reward += weight * processed_rewards[0]
+
+                all_rewards.append(weighted_reward)
+
+            return all_rewards, all_reward_components
+        else:
+            # Batch processing (multiple prompts)
+            agent1_completions = []
+            agent2_completions = []
+
+            # Extract completions
+            for prompt_idx in range(len(prompts)):
+                if prompt_idx < len(completions_list[0]):
+                    agent1_completion = completions_list[0][prompt_idx][0] if isinstance(
+                        completions_list[0][prompt_idx], list) else completions_list[0][prompt_idx]
+                    agent1_completions.append(agent1_completion)
+
+                if prompt_idx < len(completions_list[1]):
+                    agent2_completion = completions_list[1][prompt_idx][0] if isinstance(
+                        completions_list[1][prompt_idx], list) else completions_list[1][prompt_idx]
+                    agent2_completions.append(agent2_completion)
+
+            # Log metrics for batch if wandb is enabled
+            if self.wandb_initialized and len(agent1_completions) > 0 and len(agent2_completions) > 0:
+                self._log_batch_metrics(agent1_completions, agent2_completions)
+
+            # Calculate rewards for each function
+            weighted_rewards = [0.0] * len(agent1_completions)
+
+            for func_idx, (reward_func, weight, processor) in enumerate(
+                    zip(self.reward_funcs, self.reward_weights, self.reward_processors)
+            ):
+                # Call reward function for all samples
+                batch_rewards = reward_func(agent1_completions, agent2_completions)
+
+                # Apply processor to rewards
+                processed_rewards = [processor(r) for r in batch_rewards]
+
+                # Store component rewards for logging
+                all_reward_components[func_idx].extend(processed_rewards)
+
+                # Add weighted component to total rewards
+                for i, r in enumerate(processed_rewards):
+                    if i < len(weighted_rewards):
+                        weighted_rewards[i] += weight * r
+
+            return weighted_rewards, all_reward_components
+
+    def _log_completion_metrics(self, completion1, completion2):
+        """Log detailed metrics about a pair of completions to wandb."""
+        len1 = len(completion1)
+        len2 = len(completion2)
+
+        log_data = {
+            "agent1_completion_length": len1,
+            "agent2_completion_length": len2,
+            "max_min_len_ratio": max(len1, len2) / min(len1, len2) if min(len1, len2) > 0 else max(len1, len2),
+            "agent_2_1_len_ratio": len2 / len1 if len1 > 0 else len2,
+        }
+
+        # Add TTR metrics if available
+        # This assumes vocabulary_richness_reward might be one of our functions
+        calculate_ttr = None
+        for func in self.reward_funcs:
+            if hasattr(func, '__name__') and func.__name__ == 'vocabulary_richness_reward':
+                calculate_ttr = getattr(func, 'calculate_ttr', None)
+                break
+
+        if calculate_ttr:
+            ttr1 = calculate_ttr(completion1, STOPWORDS)
+            ttr2 = calculate_ttr(completion2, STOPWORDS)
+            log_data.update({
+                "agent1_ttr": ttr1,
+                "agent2_ttr": ttr2,
+                "ttr_ratio": ttr2 / ttr1 if ttr1 > 0 else float('inf'),
+                "ttr_improvement": max(0, ttr2 - ttr1),
+            })
+
+        wandb.log(log_data)
+
+    def _log_batch_metrics(self, agent1_completions, agent2_completions):
+        """Log aggregate metrics about batches of completions to wandb."""
+        # Log length metrics
+        agent1_lengths = [len(c) for c in agent1_completions]
+        agent2_lengths = [len(c) for c in agent2_completions]
+
+        avg_len1 = sum(agent1_lengths) / len(agent1_lengths) if agent1_lengths else 0
+        avg_len2 = sum(agent2_lengths) / len(agent2_lengths) if agent2_lengths else 0
+
+        log_data = {
+            "avg_agent1_completion_length": avg_len1,
+            "avg_agent2_completion_length": avg_len2,
+            "avg_length_ratio": avg_len2 / avg_len1 if avg_len1 > 0 else float('inf'),
+        }
+
+        # Add TTR metrics if available
+        calculate_ttr = None
+        for func in self.reward_funcs:
+            if hasattr(func, '__name__') and func.__name__ == 'vocabulary_richness_reward':
+                calculate_ttr = getattr(func, 'calculate_ttr', None)
+                break
+
+        if calculate_ttr:
+            ttr1_values = [calculate_ttr(completion, STOPWORDS) for completion in agent1_completions]
+            ttr2_values = [calculate_ttr(completion, STOPWORDS) for completion in agent2_completions]
+
+            avg_ttr1 = sum(ttr1_values) / len(ttr1_values) if ttr1_values else 0
+            avg_ttr2 = sum(ttr2_values) / len(ttr2_values) if ttr2_values else 0
+
+            log_data.update({
+                "avg_agent1_ttr": avg_ttr1,
+                "avg_agent2_ttr": avg_ttr2,
+                "avg_ttr_ratio": avg_ttr2 / avg_ttr1 if avg_ttr1 > 0 else float('inf'),
+            })
+
+        wandb.log(log_data)
 
     def _compute_loss_with_gradients(self, agent, completions_data, rewards):
         """
@@ -958,139 +1233,40 @@ class MAGRPOTrainer:
                         f"final_agent{agent_idx + 1}_sample_output": output
                     })
 
-# Define a simple external reward function
-def length_ratio_reward(completions1, completions2):
-    """Example reward function that rewards based on length ratio between agent outputs"""
-    rewards = []
-    for c1, c2 in zip(completions1, completions2):
-        len1, len2 = len(c1), len(c2)
-        # Reward based on the ratio of lengths
-        ratio = max(len1, len2) / min(len1, len2) if min(len1, len2) > 0 else max(len1, len2)
-        rewards.append(float(ratio))
-    return rewards
+
+# Define reward processors that can be used with the MAGRPOTrainer
+class RewardProcessors:
+    """Collection of reward processing functions to modify raw rewards."""
+
+    @staticmethod
+    def clamp(min_val=-10.0, max_val=10.0):
+        """Return a processor that clamps rewards to a range."""
+        return lambda x: max(min_val, min(max_val, x))
+
+    @staticmethod
+    def sigmoid_scale():
+        """Return a processor that applies sigmoid scaling to rewards."""
+        import math
+        return lambda x: 1.0 / (1.0 + math.exp(-x))
+
+    @staticmethod
+    def normalize_by_length(max_len=1000):
+        """Return a processor that normalizes rewards by text length."""
+
+        def processor(reward, text_length=None):
+            if text_length is None:
+                return reward
+            norm_factor = min(1.0, text_length / max_len)
+            return reward * norm_factor
+
+        return processor
 
 
-def proper_length_ratio_reward(completions1, completions2):
-    """Reward function that gives high reward when the second completion is 2-3 times longer than the first.
-
-    The maximum reward is given when the ratio is exactly in the target range (2-3x),
-    and gradually decreases as the ratio moves further from this range.
-    """
-    rewards = []
-    for c1, c2 in zip(completions1, completions2):
-        len1, len2 = len(c1), len(c2)
-
-        # Ensure we don't divide by zero
-        if len1 == 0:
-            rewards.append(0.0)  # No reward for empty first completion
-            continue
-
-        # Calculate the ratio of second to first completion
-        ratio = len2 / len1
-
-        # Define target range and calculate reward
-        target_min = 2.0
-        target_max = 3.0
-
-        if target_min <= ratio <= target_max:
-            # Maximum reward (1.0) when within the target range
-            reward = 1.0
-        else:
-            # Calculate distance from the nearest boundary of the target range
-            if ratio < target_min:
-                distance = target_min - ratio
-            else:  # ratio > target_max
-                distance = ratio - target_max
-
-            # Reward decreases as distance increases
-            # Using an exponential decay function: reward = e^(-distance)
-            import math
-            reward = math.exp(-distance)
-
-        rewards.append(float(reward))
-
-    return rewards
-
-
-def vocabulary_richness_reward(completions1, completions2):
-    """Reward function that gives high reward when the second completion has higher
-    vocabulary richness (Type-Token Ratio without stopwords) than the first.
-
-    The reward is based on the improvement in TTR from the first to the second completion.
-    Maximum reward is given when the second completion's TTR is substantially higher,
-    and gradually decreases as the improvement diminishes.
-    """
-    import math
-
-    def calculate_ttr(text, stopwords):
-        """Calculate Type-Token Ratio (TTR) excluding stopwords.
-
-        Args:
-            text: String text to analyze
-            stopwords: Set of stopwords to exclude
-
-        Returns:
-            Float value representing TTR (unique content words / total content words)
-        """
-        import re
-
-        # Tokenize by splitting on non-alphanumeric characters and convert to lowercase
-        words = re.findall(r'\b\w+\b', text.lower())
-
-        # Filter out stopwords
-        if stopwords:
-            content_words = [word for word in words if word not in stopwords]
-        else:
-            content_words = words
-
-        # Calculate TTR (unique words / total words)
-        if not content_words:
-            return 0.0
-
-        types = len(set(content_words))
-        tokens = len(content_words)
-
-        return types / tokens if tokens > 0 else 0.0
-
-    vocabulary_richness_reward.calculate_ttr = calculate_ttr
-    rewards = []
-    for c1, c2 in zip(completions1, completions2):
-        # Calculate TTR for both completions
-        ttr1 = calculate_ttr(c1, STOPWORDS)
-        ttr2 = calculate_ttr(c2, STOPWORDS)
-
-        # Handle edge cases
-        if ttr1 == 0:
-            if ttr2 > 0:
-                reward = 1.0  # Maximum reward if improvement from zero
-            else:
-                reward = 0.0  # No reward if both are zero
-        else:
-            # Calculate improvement ratio
-            improvement = ttr2 / ttr1
-
-            # Define target range for improvement
-            target_min = 1.2  # At least 20% improvement
-            target_max = 2.0  # Up to double the vocabulary richness
-
-            if improvement >= target_max:
-                reward = 1.0  # Maximum reward
-            elif improvement >= target_min:
-                # Linear scaling between min and max targets
-                reward = (improvement - target_min) / (target_max - target_min)
-            else:
-                # Exponential decay for below-target improvement
-                distance = target_min - improvement
-                reward = math.exp(-2 * distance)  # Steeper decay
-
-        rewards.append(float(reward))
-
-    return rewards
-
-
-def example_usage():
+# Example usage with multiple reward functions
+def example_usage_multi_reward():
     from transformers import AutoTokenizer, AutoModelForCausalLM
     from peft import LoraConfig, get_peft_model, TaskType
+    from datasets import load_dataset
 
     # Load tokenizer
     model_name = "Qwen/Qwen2.5-0.5B"
@@ -1098,7 +1274,7 @@ def example_usage():
 
     # Configure MAGRPO
     config = MAGRPOConfig(
-        output_dir="./magrpo_lora_output",
+        output_dir="./magrpo_multi_reward_output",
         num_train_epochs=10,
         per_device_train_batch_size=4,
         learning_rate=5e-5,
@@ -1109,8 +1285,6 @@ def example_usage():
     )
 
     # Create dataset
-    from datasets import load_dataset
-
     dataset_name = "trl-lib/tldr"
     dataset_split = "train[:100]"
     train_dataset = load_dataset(dataset_name, split=dataset_split)
@@ -1119,18 +1293,31 @@ def example_usage():
     wandb_config = {
         "project": "trl",
         "entity": "nu-llpr",
-        "name": "qwen2.5-0.5B-lora-magrpo",
+        "name": "qwen-magrpo-multi-reward",
     }
+
+    # Set up reward functions with weights
+    reward_funcs = [
+        vocabulary_richness_reward,  # Reward based on vocabulary richness
+        proper_length_ratio_reward,  # Reward based on length ratio
+    ]
+
+    # Higher weight for vocabulary richness (0.7) vs length ratio (0.3)
+    reward_weights = [0.7, 0.3]
+
+    # Set up reward processors
+    reward_processors = [
+        RewardProcessors.clamp(-5.0, 5.0),  # Clamp vocabulary richness rewards
+        RewardProcessors.sigmoid_scale(),  # Apply sigmoid to length ratio rewards
+    ]
 
     # Configure LoRA
     lora_config = LoraConfig(
-        r=1024,  # Increased rank for better capacity/expressivity
-        lora_alpha=2048,  # Increased alpha to maintain same alpha/r ratio (2:1)
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],  # More modules
-        lora_dropout=0.1,  # Slightly higher dropout for better regularization
-        bias="none",  # Keep bias fixed to prevent overfitting
-        modules_to_save=["embed_tokens", "lm_head"],  # Tune embedding and output layers
-        fan_in_fan_out=False,  # Set appropriately based on model architecture
+        r=16,
+        lora_alpha=32,
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+        lora_dropout=0.05,
+        bias="none",
         task_type=TaskType.CAUSAL_LM
     )
 
@@ -1139,14 +1326,14 @@ def example_usage():
     for _ in range(2):
         base_model = AutoModelForCausalLM.from_pretrained(model_name)
         lora_model = get_peft_model(base_model, lora_config)
-        lora_model.print_trainable_parameters()
-        # lora_model = base_model
         agents.append(lora_model)
 
-    # Initialize trainer with our pre-created agents
+    # Initialize trainer with multiple reward functions
     trainer = MAGRPOTrainer(
         agents=agents,
-        reward_funcs=vocabulary_richness_reward,
+        reward_funcs=reward_funcs,
+        reward_weights=reward_weights,
+        reward_processors=reward_processors,
         args=config,
         train_dataset=train_dataset,
         tokenizer=tokenizer,
@@ -1157,11 +1344,9 @@ def example_usage():
     trainer.train()
 
     # Save models
-    for i, agent in enumerate(trainer.agents):
-        agent.save_pretrained(f"{config.output_dir}/final_lora_agent_{i}")
-    tokenizer.save_pretrained(f"{config.output_dir}/tokenizer")
+    trainer.save_model(f"{config.output_dir}/final_models")
     print("Training complete!")
 
 
 if __name__ == "__main__":
-    example_usage()
+    example_usage_multi_reward()
