@@ -5,7 +5,7 @@
 #SBATCH --nodes=1                    # Request one node
 #SBATCH --ntasks-per-node=8          # 8 tasks
 #SBATCH --gpus-per-node=1           # Request 8 GPUs
-#SBATCH --constraint=gpu200          # Specify GPU 200 devices
+#SBATCH --constraint=gpuH200x8         # Specify GPU 200 devices
 #SBATCH --time=24:00:00              # Set your time limit (HH:MM:SS)
 #SBATCH --output=trl_magrpo_%j.out   # Output file with job ID
 #SBATCH --error=trl_magrpo_%j.err    # Error file with job ID
