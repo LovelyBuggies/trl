@@ -1303,12 +1303,12 @@ def example_usage_multi_reward():
     ]
 
     # Higher weight for vocabulary richness (0.7) vs length ratio (0.3)
-    reward_weights = [0.7, 0.3]
+    reward_weights = [0.3, 0.7]
 
     # Set up reward processors
     reward_processors = [
-        RewardProcessors.clamp(-5.0, 5.0),  # Clamp vocabulary richness rewards
-        RewardProcessors.sigmoid_scale(),  # Apply sigmoid to length ratio rewards
+        None,  # Clamp vocabulary richness rewards
+        None,  # Apply sigmoid to length ratio rewards
     ]
 
     # Configure LoRA
