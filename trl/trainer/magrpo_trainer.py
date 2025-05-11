@@ -1056,10 +1056,6 @@ def vocabulary_richness_reward(completions1, completions2):
         return types / tokens if tokens > 0 else 0.0
 
     vocabulary_richness_reward.calculate_ttr = calculate_ttr
-
-    # Common English stopwords to exclude
-
-
     rewards = []
     for c1, c2 in zip(completions1, completions2):
         # Calculate TTR for both completions
@@ -1112,7 +1108,7 @@ def example_usage():
         logging_steps=10,
         save_steps=100,
         num_generations=8,
-        max_new_tokens=256,
+        max_new_tokens=512,
     )
 
     # Create dataset
@@ -1200,9 +1196,9 @@ def example_usage():
     agents = []
     for _ in range(2):
         base_model = AutoModelForCausalLM.from_pretrained(model_name)
-        lora_model = get_peft_model(base_model, lora_config)
-        lora_model.print_trainable_parameters()
-        # lora_model = base_model
+        # lora_model = get_peft_model(base_model, lora_config)
+        # lora_model.print_trainable_parameters()
+        lora_model = base_model
         agents.append(lora_model)
 
     # Initialize trainer with our pre-created agents
