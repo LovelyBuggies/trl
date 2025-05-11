@@ -962,7 +962,7 @@ def example_usage():
     # 2. Configure MAGRPO
     config = MAGRPOConfig(
         output_dir="./magrpo_lora_output",
-        num_train_epochs=50,
+        num_train_epochs=5,
         per_device_train_batch_size=4,
         learning_rate=5e-5,
         logging_steps=10,
@@ -1018,6 +1018,10 @@ def example_usage():
         ]
     }
     train_dataset = Dataset.from_dict(train_data)
+    # from datasets import load_dataset
+    # dataset_name = "trl-lib/tldr"
+    # dataset_split = "train[:100]"
+    # train_dataset = load_dataset(dataset_name, split=dataset_split)
 
     # 4. Configure wandb
     wandb_config = {
@@ -1028,14 +1032,24 @@ def example_usage():
 
     # 5. Configure LoRA
     lora_config = LoraConfig(
-        r=32,
-        lora_alpha=64,
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+        r=32,  # Increased rank for better capacity/expressivity
+        lora_alpha=64,  # Increased alpha to maintain same alpha/r ratio (2:1)
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],  # More modules
         lora_dropout=0.1,  # Slightly higher dropout for better regularization
         bias="none",  # Keep bias fixed to prevent overfitting
+        modules_to_save=["embed_tokens", "lm_head"],  # Tune embedding and output layers
         fan_in_fan_out=False,  # Set appropriately based on model architecture
         task_type=TaskType.CAUSAL_LM
     )
+    # lora_config = LoraConfig(
+    #     r=32,  # Increased rank for better capacity/expressivity
+    #     lora_alpha=64,  # Increased alpha to maintain same alpha/r ratio (2:1)
+    #     target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+    #     lora_dropout=0.05,  # Slightly higher dropout for better regularization
+    #     bias="none",  # Keep bias fixed to prevent overfitting
+    #     fan_in_fan_out=False,  # Set appropriately based on model architecture
+    #     task_type=TaskType.CAUSAL_LM
+    # )
 
     # 6. Create agents list with two independent LoRA models
     agents = []
