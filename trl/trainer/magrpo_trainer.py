@@ -1075,8 +1075,8 @@ def example_usage():
 
     # Configure LoRA
     lora_config = LoraConfig(
-        r=64,  # Increased rank for better capacity/expressivity
-        lora_alpha=128,  # Increased alpha to maintain same alpha/r ratio (2:1)
+        r=1024,  # Increased rank for better capacity/expressivity
+        lora_alpha=2048,  # Increased alpha to maintain same alpha/r ratio (2:1)
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],  # More modules
         lora_dropout=0.1,  # Slightly higher dropout for better regularization
         bias="none",  # Keep bias fixed to prevent overfitting
@@ -1106,7 +1106,7 @@ def example_usage():
     # Initialize trainer with our pre-created agents
     trainer = MAGRPOTrainer(
         agents=agents,
-        reward_funcs=length_ratio_reward,
+        reward_funcs=proper_length_ratio_reward,
         args=config,
         train_dataset=train_dataset,
         tokenizer=tokenizer,
