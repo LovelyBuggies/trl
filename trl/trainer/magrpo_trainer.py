@@ -216,7 +216,7 @@ class MAGRPOTrainer:
                 if isinstance(batch, list) and all(isinstance(item, dict) for item in batch):
                     # Process each prompt separately - this is the expected format
                     for prompt_idx, prompt_item in enumerate(batch):
-                        prompt = prompt_item["prompt"]
+                        prompt = prompt_item["prompt"][:120]
 
                         # Generate completions from each agent for this single prompt
                         all_completions = []
@@ -951,15 +951,57 @@ def length_ratio_reward(completions1, completions2):
     return rewards
 
 
+def proper_length_ratio_reward(completions1, completions2):
+    """Reward function that gives high reward when the second completion is 2-3 times longer than the first.
+
+    The maximum reward is given when the ratio is exactly in the target range (2-3x),
+    and gradually decreases as the ratio moves further from this range.
+    """
+    rewards = []
+    for c1, c2 in zip(completions1, completions2):
+        len1, len2 = len(c1), len(c2)
+
+        # Ensure we don't divide by zero
+        if len1 == 0:
+            rewards.append(0.0)  # No reward for empty first completion
+            continue
+
+        # Calculate the ratio of second to first completion
+        ratio = len2 / len1
+
+        # Define target range and calculate reward
+        target_min = 2.0
+        target_max = 3.0
+
+        if target_min <= ratio <= target_max:
+            # Maximum reward (1.0) when within the target range
+            reward = 1.0
+        else:
+            # Calculate distance from the nearest boundary of the target range
+            if ratio < target_min:
+                distance = target_min - ratio
+            else:  # ratio > target_max
+                distance = ratio - target_max
+
+            # Reward decreases as distance increases
+            # Using an exponential decay function: reward = e^(-distance)
+            import math
+            reward = math.exp(-distance)
+
+        rewards.append(float(reward))
+
+    return rewards
+
+
 def example_usage():
     from transformers import AutoTokenizer, AutoModelForCausalLM
     from peft import LoraConfig, get_peft_model, TaskType
 
-    # 1. Load tokenizer
+    # Load tokenizer
     model_name = "Qwen/Qwen2.5-0.5B"
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-    # 2. Configure MAGRPO
+    # Configure MAGRPO
     config = MAGRPOConfig(
         output_dir="./magrpo_lora_output",
         num_train_epochs=5,
@@ -971,66 +1013,67 @@ def example_usage():
         max_new_tokens=100,
     )
 
-    # 3. Create dataset
+    # Create dataset
     from datasets import Dataset
-    train_data = {
-        "prompt": [
-            "Write a story about a robot:",
-            "Explain quantum physics:",
-            "Create a recipe for chocolate cake:",
-            "Write a song about snow:",
-            "Describe a city in the clouds:",
-            "Invent a new holiday and explain it:",
-            "Write a bedtime story for a dragon:",
-            "Explain how teleportation might work:",
-            "Design a futuristic bicycle:",
-            "Tell a joke about dinosaurs:",
-            "Write a poem about the ocean at night:",
-            "Describe a world without electricity:",
-            "Create a superhero with a unique power:",
-            "Write a scene where the moon talks:",
-            "Explain black holes to a 5-year-old:",
-            "Invent a new type of fruit:",
-            "Describe the life of a time-traveling cat:",
-            "Write an apology letter from a ghost:",
-            "Explain gravity using a pizza analogy:",
-            "Design a playground on Mars:",
-            "Write a love letter between two stars:",
-            "Invent a game played by aliens:",
-            "Describe a school for magical creatures:",
-            "Write a recipe for an invisible soup:",
-            "Explain Wi-Fi to someone from the 1800s:",
-            "Create a workout plan for robots:",
-            "Describe a hotel at the bottom of the ocean:",
-            "Write a story about a lost shadow:",
-            "Invent a musical instrument from glass:",
-            "Explain the internet using only food terms:",
-            "Design a zoo for extinct animals:",
-            "Write a diary entry from a raindrop:",
-            "Describe a world where pets can talk:",
-            "Explain how dreams are made:",
-            "Create a menu for a restaurant in space:",
-            "Write a letter from a tree to a human:",
-            "Invent a holiday where everyone wears pajamas:",
-            "Describe a rainbow factory:",
-            "Write a scene from a robot cooking show:",
-            "Explain the weather like a pirate would:"
-        ]
-    }
-    train_dataset = Dataset.from_dict(train_data)
-    # from datasets import load_dataset
-    # dataset_name = "trl-lib/tldr"
-    # dataset_split = "train[:100]"
-    # train_dataset = load_dataset(dataset_name, split=dataset_split)
+    from datasets import load_dataset
+    # train_data = {
+    #     "prompt": [
+    #         "Write a story about a robot:",
+    #         "Explain quantum physics:",
+    #         "Create a recipe for chocolate cake:",
+    #         "Write a song about snow:",
+    #         "Describe a city in the clouds:",
+    #         "Invent a new holiday and explain it:",
+    #         "Write a bedtime story for a dragon:",
+    #         "Explain how teleportation might work:",
+    #         "Design a futuristic bicycle:",
+    #         "Tell a joke about dinosaurs:",
+    #         "Write a poem about the ocean at night:",
+    #         "Describe a world without electricity:",
+    #         "Create a superhero with a unique power:",
+    #         "Write a scene where the moon talks:",
+    #         "Explain black holes to a 5-year-old:",
+    #         "Invent a new type of fruit:",
+    #         "Describe the life of a time-traveling cat:",
+    #         "Write an apology letter from a ghost:",
+    #         "Explain gravity using a pizza analogy:",
+    #         "Design a playground on Mars:",
+    #         "Write a love letter between two stars:",
+    #         "Invent a game played by aliens:",
+    #         "Describe a school for magical creatures:",
+    #         "Write a recipe for an invisible soup:",
+    #         "Explain Wi-Fi to someone from the 1800s:",
+    #         "Create a workout plan for robots:",
+    #         "Describe a hotel at the bottom of the ocean:",
+    #         "Write a story about a lost shadow:",
+    #         "Invent a musical instrument from glass:",
+    #         "Explain the internet using only food terms:",
+    #         "Design a zoo for extinct animals:",
+    #         "Write a diary entry from a raindrop:",
+    #         "Describe a world where pets can talk:",
+    #         "Explain how dreams are made:",
+    #         "Create a menu for a restaurant in space:",
+    #         "Write a letter from a tree to a human:",
+    #         "Invent a holiday where everyone wears pajamas:",
+    #         "Describe a rainbow factory:",
+    #         "Write a scene from a robot cooking show:",
+    #         "Explain the weather like a pirate would:"
+    #     ]
+    # }
+    # train_dataset = Dataset.from_dict(train_data)
 
-    # 4. Configure wandb
+    dataset_name = "trl-lib/tldr"
+    dataset_split = "train[:100]"
+    train_dataset = load_dataset(dataset_name, split=dataset_split)
+
+    # Configure wandb
     wandb_config = {
         "project": "trl",
         "entity": "nu-llpr",
         "name": "qwen2.5-0.5B-lora-magrpo",
     }
 
-    # 5. Configure LoRA
+    # Configure LoRA
     lora_config = LoraConfig(
         r=32,  # Increased rank for better capacity/expressivity
         lora_alpha=64,  # Increased alpha to maintain same alpha/r ratio (2:1)
@@ -1051,19 +1094,17 @@ def example_usage():
     #     task_type=TaskType.CAUSAL_LM
     # )
 
-    # 6. Create agents list with two independent LoRA models
+    # Create agents list with two independent LoRA models
     agents = []
     for _ in range(2):
-        # Load a fresh model instance each time
         base_model = AutoModelForCausalLM.from_pretrained(model_name)
-        # Apply LoRA to it
         lora_model = get_peft_model(base_model, lora_config)
         lora_model.print_trainable_parameters()
         agents.append(lora_model)
 
-    # 7. Initialize trainer with our pre-created agents
+    # Initialize trainer with our pre-created agents
     trainer = MAGRPOTrainer(
-        agents=agents,  # Pass our pre-created LoRA models
+        agents=agents,
         reward_funcs=length_ratio_reward,
         args=config,
         train_dataset=train_dataset,
@@ -1071,10 +1112,10 @@ def example_usage():
         wandb_config=wandb_config,
     )
 
-    # 8. Train
+    # Train
     trainer.train()
 
-    # 9. Save models
+    # Save models
     for i, agent in enumerate(trainer.agents):
         agent.save_pretrained(f"{config.output_dir}/final_lora_agent_{i}")
     tokenizer.save_pretrained(f"{config.output_dir}/tokenizer")
