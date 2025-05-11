@@ -1313,11 +1313,13 @@ def example_usage_multi_reward():
 
     # Configure LoRA
     lora_config = LoraConfig(
-        r=16,
-        lora_alpha=32,
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
-        lora_dropout=0.05,
-        bias="none",
+        r=1024,  # Increased rank for better capacity/expressivity
+        lora_alpha=2048,  # Increased alpha to maintain same alpha/r ratio (2:1)
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],  # More modules
+        lora_dropout=0.1,  # Slightly higher dropout for better regularization
+        bias="none",  # Keep bias fixed to prevent overfitting
+        modules_to_save=["embed_tokens", "lm_head"],  # Tune embedding and output layers
+        fan_in_fan_out=False,  # Set appropriately based on model architecture
         task_type=TaskType.CAUSAL_LM
     )
 
