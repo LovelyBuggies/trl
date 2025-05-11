@@ -973,8 +973,50 @@ def example_usage():
 
     # 3. Create dataset
     from datasets import Dataset
-    train_data = {"prompt": ["Write a story about a robot:", "Explain quantum physics:",
-                             "Create a recipe for chocolate cake:", "Write a song about snow:"] * 10}
+    train_data = {
+        "prompt": [
+            "Write a story about a robot:",
+            "Explain quantum physics:",
+            "Create a recipe for chocolate cake:",
+            "Write a song about snow:",
+            "Describe a city in the clouds:",
+            "Invent a new holiday and explain it:",
+            "Write a bedtime story for a dragon:",
+            "Explain how teleportation might work:",
+            "Design a futuristic bicycle:",
+            "Tell a joke about dinosaurs:",
+            "Write a poem about the ocean at night:",
+            "Describe a world without electricity:",
+            "Create a superhero with a unique power:",
+            "Write a scene where the moon talks:",
+            "Explain black holes to a 5-year-old:",
+            "Invent a new type of fruit:",
+            "Describe the life of a time-traveling cat:",
+            "Write an apology letter from a ghost:",
+            "Explain gravity using a pizza analogy:",
+            "Design a playground on Mars:",
+            "Write a love letter between two stars:",
+            "Invent a game played by aliens:",
+            "Describe a school for magical creatures:",
+            "Write a recipe for an invisible soup:",
+            "Explain Wi-Fi to someone from the 1800s:",
+            "Create a workout plan for robots:",
+            "Describe a hotel at the bottom of the ocean:",
+            "Write a story about a lost shadow:",
+            "Invent a musical instrument from glass:",
+            "Explain the internet using only food terms:",
+            "Design a zoo for extinct animals:",
+            "Write a diary entry from a raindrop:",
+            "Describe a world where pets can talk:",
+            "Explain how dreams are made:",
+            "Create a menu for a restaurant in space:",
+            "Write a letter from a tree to a human:",
+            "Invent a holiday where everyone wears pajamas:",
+            "Describe a rainbow factory:",
+            "Write a scene from a robot cooking show:",
+            "Explain the weather like a pirate would:"
+        ]
+    }
     train_dataset = Dataset.from_dict(train_data)
 
     # 4. Configure wandb
@@ -986,12 +1028,11 @@ def example_usage():
 
     # 5. Configure LoRA
     lora_config = LoraConfig(
-        r=64,  # Increased rank for better capacity/expressivity
-        lora_alpha=128,  # Increased alpha to maintain same alpha/r ratio (2:1)
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],  # More modules
+        r=32,
+        lora_alpha=64,
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
         lora_dropout=0.1,  # Slightly higher dropout for better regularization
         bias="none",  # Keep bias fixed to prevent overfitting
-        modules_to_save=["embed_tokens", "lm_head"],  # Tune embedding and output layers
         fan_in_fan_out=False,  # Set appropriately based on model architecture
         task_type=TaskType.CAUSAL_LM
     )
