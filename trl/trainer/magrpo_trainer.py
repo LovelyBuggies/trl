@@ -288,7 +288,14 @@ class MAGRPOTrainer:
             if len(reward_processors) != len(self.reward_funcs):
                 raise ValueError(f"Number of reward processors ({len(reward_processors)}) must match "
                                  f"number of reward functions ({len(self.reward_funcs)})")
-            self.reward_processors = reward_processors
+
+            # Handle None processors by replacing with identity function
+            self.reward_processors = []
+            for processor in reward_processors:
+                if processor is None:
+                    self.reward_processors.append(lambda x: x)  # Identity function
+                else:
+                    self.reward_processors.append(processor)
 
     def _init_wandb(self):
         """Initialize Weights & Biases for tracking."""
@@ -1239,6 +1246,11 @@ class RewardProcessors:
     """Collection of reward processing functions to modify raw rewards."""
 
     @staticmethod
+    def identity():
+        """Return an identity processor that returns the reward unchanged."""
+        return lambda x: x
+
+    @staticmethod
     def clamp(min_val=-10.0, max_val=10.0):
         """Return a processor that clamps rewards to a range."""
         return lambda x: max(min_val, min(max_val, x))
@@ -1260,6 +1272,12 @@ class RewardProcessors:
             return reward * norm_factor
 
         return processor
+
+    @staticmethod
+    def exponential_scale(factor=1.0):
+        """Return a processor that applies exponential scaling to rewards."""
+        import math
+        return lambda x: math.exp(factor * x) - 1 if x > 0 else -math.exp(-factor * x) + 1
 
 
 # Example usage with multiple reward functions
@@ -1302,13 +1320,13 @@ def example_usage_multi_reward():
         proper_length_ratio_reward,  # Reward based on length ratio
     ]
 
-    # Higher weight for vocabulary richness (0.7) vs length ratio (0.3)
+    # Higher weight for vocabulary richness (0.3) vs length ratio (0.7)
     reward_weights = [0.3, 0.7]
 
     # Set up reward processors
     reward_processors = [
-        None,  # Clamp vocabulary richness rewards
-        None,  # Apply sigmoid to length ratio rewards
+        None,
+        None,
     ]
 
     # Configure LoRA
