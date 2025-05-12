@@ -4,6 +4,7 @@ import nltk
 from nltk.sentiment import SentimentIntensityAnalyzer
 from nltk.tokenize import sent_tokenize, word_tokenize
 
+
 # Ensure necessary NLTK packages are downloaded
 # This will properly download and install NLTK data resources
 def ensure_nltk_resources():
@@ -17,6 +18,7 @@ def ensure_nltk_resources():
             print(f"Downloading NLTK resource '{resource}'...")
             nltk.download(resource)
             print(f"NLTK resource '{resource}' has been downloaded.")
+
 
 # Call this function at import time to ensure resources are available
 ensure_nltk_resources()
@@ -171,7 +173,7 @@ def vocabulary_richness_reward(completions1, completions2):
 
 
 def sentiment_contrast_reward(completions1, completions2):
-    """Reward function that rewards when completion2 has more negative sentiment 
+    """Reward function that rewards when completion2 has more negative sentiment
     compared to completion1.
 
     The reward is higher when:
@@ -246,7 +248,7 @@ def sentiment_contrast_reward(completions1, completions2):
 
 
 def syntax_complexity_reward(completions1, completions2):
-    """Reward function that gives high reward when the second completion has more 
+    """Reward function that gives high reward when the second completion has more
     complex syntax than the first.
 
     Complexity is measured by:
@@ -324,7 +326,7 @@ def syntax_complexity_reward(completions1, completions2):
         complexity1 = calculate_complexity(c1)
         complexity2 = calculate_complexity(c2)
 
-        # Calculate ratio of complexities 
+        # Calculate ratio of complexities
         # Higher ratio means c2 is more complex than c1
         if complexity1 == 0:
             ratio = 2.0 if complexity2 > 0 else 0.0
@@ -496,8 +498,13 @@ def question_generation_reward(completions1, completions2):
             return {"count": 0, "quality": 0, "score": 0}
 
         # Identify question sentences
-        sentences = sent_tokenize(text)
-        questions = [s for s in sentences if s.strip().endswith('?')]
+        try:
+            sentences = sent_tokenize(text)
+            questions = [s for s in sentences if s.strip().endswith('?')]
+        except Exception as e:
+            # Fallback to a simpler method if NLTK fails
+            print(f"Warning: NLTK tokenization failed, using fallback method: {e}")
+            questions = re.findall(r'[^.!?]+\?', text)
 
         if not questions:
             return {"count": 0, "quality": 0, "score": 0}
@@ -600,9 +607,17 @@ def fact_density_reward(completions1, completions2):
             return 0.0
 
         # Count sentences for normalization
-        sentences = sent_tokenize(text)
-        if not sentences:
-            return 0.0
+        try:
+            sentences = sent_tokenize(text)
+            if not sentences:
+                return 0.0
+        except Exception as e:
+            # Fallback if NLTK fails
+            print(f"Warning: NLTK sentence tokenization failed: {e}")
+            # Simple fallback tokenization by splitting on periods
+            sentences = [s.strip() for s in re.split(r'[.!?]+', text) if s.strip()]
+            if not sentences:
+                return 0.0
 
         num_sentences = len(sentences)
 
@@ -819,8 +834,8 @@ def summarization_reward(completions1, completions2, source_text=None):
             return 0.0
 
         # First check length ratio (summary should be shorter)
-        original_words = original.split()
-        summary_words = summary.split()
+        original_words = word_tokenize(original) if original else []
+        summary_words = word_tokenize(summary) if summary else []
 
         original_length = len(original_words)
         summary_length = len(summary_words)
@@ -845,7 +860,7 @@ def summarization_reward(completions1, completions2, source_text=None):
         # Check for key content words from original appearing in summary
         # Extract content words (non-stopwords)
         def get_content_words(text):
-            words = re.findall(r'\b\w+\b', text.lower())
+            words = word_tokenize(text.lower()) if text else []
             return [w for w in words if w not in STOPWORDS and len(w) > 2]
 
         original_content_words = get_content_words(original)
