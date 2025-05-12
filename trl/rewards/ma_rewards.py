@@ -9,7 +9,7 @@ from nltk.tokenize import sent_tokenize, word_tokenize
 # This will properly download and install NLTK data resources
 def ensure_nltk_resources():
     """Download required NLTK resources if they're not already available."""
-    resources = ['punkt', 'vader_lexicon']
+    resources = ['punkt', 'punkt_tab', 'vader_lexicon']
     for resource in resources:
         try:
             nltk.data.find(f'tokenizers/{resource}')
