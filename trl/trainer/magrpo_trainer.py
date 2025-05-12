@@ -1158,7 +1158,7 @@ class RewardProcessors:
 
 
 # Example usage with multiple reward functions
-def example_usage_multi_reward():
+def example_usage():
     from transformers import AutoTokenizer, AutoModelForCausalLM
     from peft import LoraConfig, get_peft_model, TaskType
     from datasets import load_dataset
@@ -1193,9 +1193,10 @@ def example_usage_multi_reward():
 
     # Set up reward functions with weights
     reward_funcs = [
-        summarization_reward,
+        proper_length_ratio_reward,
+        vocabulary_richness_reward,
     ]
-    reward_weights = [1.0]
+    reward_weights = [0.7, 0.3]
 
     # Configure LoRA
     lora_config = LoraConfig(
@@ -1213,9 +1214,9 @@ def example_usage_multi_reward():
     agents = []
     for _ in range(2):
         base_model = AutoModelForCausalLM.from_pretrained(model_name)
-        # lora_model = get_peft_model(base_model, lora_config)
-        # lora_model.print_trainable_parameters()
-        lora_model = base_model
+        lora_model = get_peft_model(base_model, lora_config)
+        lora_model.print_trainable_parameters()
+        # lora_model = base_model
         agents.append(lora_model)
 
     # Initialize trainer with multiple reward functions
@@ -1239,4 +1240,4 @@ def example_usage_multi_reward():
 
 
 if __name__ == "__main__":
-    example_usage_multi_reward()
+    example_usage()
