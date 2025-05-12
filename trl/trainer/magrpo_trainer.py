@@ -1,40 +1,44 @@
-
 import torch
+import numpy as np
+import logging
+import os
+import wandb
 from typing import Callable, List, Optional, Union, Dict, Any, Tuple
+
 from datasets import Dataset, IterableDataset
+from torch.utils.data import DataLoader
 from transformers import (
     PreTrainedModel,
     PreTrainedTokenizerBase,
     DataCollatorWithPadding,
 )
-from torch.utils.data import DataLoader
-from trl import MAGRPOConfig
-import numpy as np
-import logging
-import os
-import wandb
-from trl import STOPWORDS, vocabulary_richness_reward, proper_length_ratio_reward, \
-        sentiment_contrast_reward, syntax_complexity_reward, readability_contrast_reward, question_generation_reward, \
-        fact_density_reward, coherence_reward, summarization_reward
+from trl import (
+    MAGRPOConfig, STOPWORDS,
+    vocabulary_richness_reward, proper_length_ratio_reward,
+    sentiment_contrast_reward, syntax_complexity_reward,
+    readability_contrast_reward, question_generation_reward,
+    fact_density_reward, coherence_reward, summarization_reward
+)
 
+# Type alias for reward functions
 RewardFunc = Union[str, PreTrainedModel, Callable[[List[str], List[str]], List[float]]]
 
 
 class MAGRPOTrainer:
     """
     Multi-Agent Group Relative Policy Optimization Trainer (MAGRPO).
+
     Currently, only supports homogenous agents and shared reward functions.
 
     Args:
-        model (str or PreTrainedModel): The model to be trained for homogenous agents
-        num_agents (int): The number of agents.
-        reward_funcs (RewardFunc or list[RewardFunc]): The reward functions for all agents.
-        reward_weights (list[float], optional): The weights for each reward function.
-        reward_processors (list[Callable], optional): Processors to apply to rewards (e.g., scaling).
-        args (MAGRPOConfig, optional): The training arguments. If not provided, default arguments will be used.
-        train_dataset (Dataset or IterableDataset, optional): The training dataset. If not provided, the default
-            dataset will be used.
-        wandb_config (dict, optional): Configuration for Weights & Biases logging.
+        model: The model to be trained for homogenous agents
+        num_agents: The number of agents
+        reward_funcs: The reward functions for all agents
+        reward_weights: The weights for each reward function
+        reward_processors: Processors to apply to rewards (e.g., scaling)
+        args: The training arguments. If not provided, default arguments will be used
+        train_dataset: The training dataset
+        wandb_config: Configuration for Weights & Biases logging
     """
 
     def __init__(
@@ -109,11 +113,13 @@ class MAGRPOTrainer:
         self.logger = logging.getLogger(__name__)
 
         # Initialize optimizers for each agent
-        self.optimizers = [torch.optim.AdamW(
-            agent.parameters(),
-            lr=self.args.learning_rate,
-            weight_decay=self.args.weight_decay
-        ) for agent in self.agents]
+        self.optimizers = [
+            torch.optim.AdamW(
+                agent.parameters(),
+                lr=self.args.learning_rate,
+                weight_decay=self.args.weight_decay
+            ) for agent in self.agents
+        ]
 
         # Initialize wandb
         self.wandb_config = wandb_config
@@ -134,8 +140,10 @@ class MAGRPOTrainer:
             self.reward_weights = [1.0 / len(self.reward_funcs)] * len(self.reward_funcs)
         else:
             if len(reward_weights) != len(self.reward_funcs):
-                raise ValueError(f"Number of reward weights ({len(reward_weights)}) must match "
-                                 f"number of reward functions ({len(self.reward_funcs)})")
+                raise ValueError(
+                    f"Number of reward weights ({len(reward_weights)}) must match "
+                    f"number of reward functions ({len(self.reward_funcs)})"
+                )
             # Normalize weights to sum to 1
             total = sum(reward_weights)
             self.reward_weights = [w / total for w in reward_weights]
@@ -146,8 +154,10 @@ class MAGRPOTrainer:
             self.reward_processors = [lambda x: x] * len(self.reward_funcs)
         else:
             if len(reward_processors) != len(self.reward_funcs):
-                raise ValueError(f"Number of reward processors ({len(reward_processors)}) must match "
-                                 f"number of reward functions ({len(self.reward_funcs)})")
+                raise ValueError(
+                    f"Number of reward processors ({len(reward_processors)}) must match "
+                    f"number of reward functions ({len(self.reward_funcs)})"
+                )
 
             # Handle None processors by replacing with identity function
             self.reward_processors = []
@@ -193,12 +203,11 @@ class MAGRPOTrainer:
 
             self.wandb_initialized = True
             self.logger.info(
-                f"Initialized wandb with project={wandb_project}, entity={wandb_entity}, name={wandb_name}")
+                f"Initialized wandb with project={wandb_project}, entity={wandb_entity}, name={wandb_name}"
+            )
 
     def get_train_dataloader(self) -> DataLoader:
-        """
-        Returns the training DataLoader.
-        """
+        """Returns the training DataLoader."""
         if self.train_dataset is None:
             raise ValueError("Trainer: training requires a train_dataset.")
 
@@ -232,8 +241,8 @@ class MAGRPOTrainer:
         outputs from each agent and computing rewards based on their interactions.
 
         Args:
-            resume_from_checkpoint (str, optional): Path to a checkpoint to resume training from.
-            **kwargs: Additional arguments to pass to the model during generation.
+            resume_from_checkpoint: Path to a checkpoint to resume training from
+            **kwargs: Additional arguments to pass to the model during generation
         """
         # Initialize wandb if not already done
         if self.wandb_config is not None and not self.wandb_initialized:
@@ -379,8 +388,10 @@ class MAGRPOTrainer:
                 wandb.log(epoch_log)
 
             # Prepare log message
-            log_message = f"Epoch {epoch}: Loss={epoch_loss / len(self.get_train_dataloader())}, " \
-                          f"Avg Reward={avg_reward}"
+            log_message = (
+                f"Epoch {epoch}: Loss={epoch_loss / len(self.get_train_dataloader())}, "
+                f"Avg Reward={avg_reward}"
+            )
 
             # Add agent rewards to log message
             for i, avg_agent_reward in enumerate(avg_agent_rewards):
@@ -401,14 +412,14 @@ class MAGRPOTrainer:
         Generate completions from an agent given prompts, preserving model state.
 
         Args:
-            agent (PreTrainedModel): The agent model to generate completions.
-            prompts (List[str]): List of prompts to generate completions for.
-            num_return_sequences (int, optional): Number of completions to generate per prompt.
-            max_new_tokens (int, optional): Maximum number of new tokens to generate.
-            **kwargs: Additional arguments to pass to the model during generation.
+            agent: The agent model to generate completions
+            prompts: List of prompts to generate completions for
+            num_return_sequences: Number of completions to generate per prompt
+            max_new_tokens: Maximum number of new tokens to generate
+            **kwargs: Additional arguments to pass to the model during generation
 
         Returns:
-            Dict: A dictionary containing generated completions and associated data.
+            Dict: A dictionary containing generated completions and associated data
         """
         device = agent.device
         batch_size = len(prompts)
@@ -584,14 +595,17 @@ class MAGRPOTrainer:
             # Ensure correct structure
             if not isinstance(completions_list[0], list) or not isinstance(completions_list[1], list):
                 self.logger.error(
-                    f"Expected lists of completions, got: {type(completions_list[0])}, {type(completions_list[1])}")
+                    f"Expected lists of completions, got: {type(completions_list[0])}, {type(completions_list[1])}"
+                )
                 completions_list = [
                     [completions_list[0]] if not isinstance(completions_list[0], list) else completions_list[0],
                     [completions_list[1]] if not isinstance(completions_list[1], list) else completions_list[1]
                 ]
 
             self.logger.info(
-                f"Processing {len(completions_list[0])} completions from agent 1 and {len(completions_list[1])} from agent 2")
+                f"Processing {len(completions_list[0])} completions from agent 1 and "
+                f"{len(completions_list[1])} from agent 2"
+            )
 
             min_completions = min(len(completions_list[0]), len(completions_list[1]))
 
@@ -671,7 +685,6 @@ class MAGRPOTrainer:
 
     def _log_completion_metrics(self, completion1, completion2):
         """Log detailed metrics about a pair of completions to wandb."""
-
         calculate_len_ratio = None
         for func in self.reward_funcs:
             if hasattr(func, '__name__') and func.__name__ == 'proper_length_ratio_reward':
@@ -748,12 +761,12 @@ class MAGRPOTrainer:
         Compute loss with proper gradient tracking by performing a new forward pass.
 
         Args:
-            agent (PreTrainedModel): The agent model.
-            completions_data (dict): The completions data from _generate_completions.
-            rewards (List[float]): The rewards for each completion.
+            agent: The agent model
+            completions_data: The completions data from _generate_completions
+            rewards: The rewards for each completion
 
         Returns:
-            torch.Tensor: The computed loss with gradients attached.
+            torch.Tensor: The computed loss with gradients attached
         """
         device = agent.device
 
@@ -846,14 +859,14 @@ class MAGRPOTrainer:
         Compute loss with proper gradient tracking and KL divergence regularization.
 
         Args:
-            agent (PreTrainedModel): The agent model.
-            completions_data (dict): The completions data from _generate_completions.
-            rewards (List[float]): The rewards for each completion.
-            old_model (PreTrainedModel, optional): The old model state for KL calculation.
-            kl_coef (float): Coefficient for KL penalty term.
+            agent: The agent model
+            completions_data: The completions data from _generate_completions
+            rewards: The rewards for each completion
+            old_model: The old model state for KL calculation
+            kl_coef: Coefficient for KL penalty term
 
         Returns:
-            torch.Tensor: The computed loss with gradients attached.
+            torch.Tensor: The computed loss with gradients attached
         """
         device = agent.device
 
@@ -979,9 +992,9 @@ class MAGRPOTrainer:
         Log training progress.
 
         Args:
-            epoch (int): Current epoch.
-            batch_idx (int): Current batch index.
-            rewards (List[float]): Rewards for the current batch.
+            epoch: Current epoch
+            batch_idx: Current batch index
+            rewards: Rewards for the current batch
         """
         avg_reward = sum(rewards) / len(rewards) if rewards else 0
         metrics = {
@@ -997,8 +1010,8 @@ class MAGRPOTrainer:
         Save model checkpoints.
 
         Args:
-            epoch (int): Current epoch.
-            batch_idx (int): Current batch index.
+            epoch: Current epoch
+            batch_idx: Current batch index
         """
         output_dir = self.args.output_dir
         if not output_dir:
@@ -1029,10 +1042,10 @@ class MAGRPOTrainer:
         Load models and training state from checkpoint.
 
         Args:
-            checkpoint_dir (str): Path to the checkpoint directory.
+            checkpoint_dir: Path to the checkpoint directory
 
         Returns:
-            int: The epoch to resume from.
+            int: The epoch to resume from
         """
         # Extract epoch from checkpoint path
         import re
@@ -1058,7 +1071,7 @@ class MAGRPOTrainer:
         Save the final trained models.
 
         Args:
-            output_dir (str): Directory to save the models to.
+            output_dir: Directory to save the models to
         """
         os.makedirs(output_dir, exist_ok=True)
 
@@ -1106,7 +1119,6 @@ class MAGRPOTrainer:
                     })
 
 
-# Define reward processors that can be used with the MAGRPOTrainer
 class RewardProcessors:
     """Collection of reward processing functions to modify raw rewards."""
 
