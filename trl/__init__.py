@@ -105,9 +105,10 @@ _import_structure = {
         "sentiment_contrast_reward",
         "syntax_complexity_reward",
         "readability_contrast_reward",
-        "question_generation_reward," 
+        "question_generation_reward",
         "fact_density_reward",
-        "coherence_reward", "summarization_reward"
+        "coherence_reward",
+        "summarization_reward",
     ],
     "trainer.callbacks": ["MergeModelCallback", "RichProgressCallback", "SyncRefModelCallback"],
     "trainer.utils": ["get_kbit_device_map", "get_peft_config", "get_quantization_config"],
