@@ -13,11 +13,25 @@ import numpy as np
 import logging
 import os
 import wandb
-from trl import STOPWORDS, vocabulary_richness_reward, proper_length_ratio_reward, \
+from trl import vocabulary_richness_reward, proper_length_ratio_reward, \
         sentiment_contrast_reward, syntax_complexity_reward, readability_contrast_reward, question_generation_reward, \
         fact_density_reward, coherence_reward, summarization_reward
 
 RewardFunc = Union[str, PreTrainedModel, Callable[[List[str], List[str]], List[float]]]
+
+# Stopwords set for vocabulary analysis
+STOPWORDS = set([
+    "a", "an", "the", "and", "but", "or", "if", "because", "as", "what",
+    "which", "this", "that", "these", "those", "then", "just", "so", "than",
+    "such", "when", "who", "how", "where", "why", "is", "am", "are", "was",
+    "were", "be", "been", "being", "have", "has", "had", "having", "do", "does",
+    "did", "doing", "to", "for", "with", "about", "against", "between", "into",
+    "through", "during", "before", "after", "above", "below", "from", "up",
+    "down", "in", "out", "on", "off", "over", "under", "again", "further",
+    "then", "once", "here", "there", "all", "any", "both", "each", "few",
+    "more", "most", "other", "some", "such", "no", "nor", "not", "only", "own",
+    "same", "so", "than", "too", "very", "can", "will", "should", "now", "of"
+])
 
 
 class MAGRPOTrainer:

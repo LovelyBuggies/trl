@@ -201,7 +201,7 @@ if TYPE_CHECKING:
     from .trainer.utils import get_kbit_device_map, get_peft_config, get_quantization_config
 
     from .rewards.rewards import reward_length, reward_capitalization
-    from .rewards.ma_rewards import STOPWORDS, vocabulary_richness_reward, proper_length_ratio_reward, \
+    from .rewards.ma_rewards import vocabulary_richness_reward, proper_length_ratio_reward, \
         sentiment_contrast_reward, syntax_complexity_reward, readability_contrast_reward, question_generation_reward, \
         fact_density_reward, coherence_reward, summarization_reward
 
