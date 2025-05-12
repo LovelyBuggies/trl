@@ -1184,7 +1184,7 @@ def example_usage_multi_reward():
         sentiment_contrast_reward,
         question_generation_reward,
     ]
-    reward_weights = [0.0, 1.7]
+    reward_weights = [0.0, 1.0]
     reward_processors = [
         None,
         None,
@@ -1207,7 +1207,8 @@ def example_usage_multi_reward():
     for _ in range(2):
         base_model = AutoModelForCausalLM.from_pretrained(model_name)
         lora_model = get_peft_model(base_model, lora_config)
-        agents.append(base_model)
+        lora_model = base_model
+        agents.append(lora_model)
 
     # Initialize trainer with multiple reward functions
     trainer = MAGRPOTrainer(
