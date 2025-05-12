@@ -1211,7 +1211,7 @@ def example_usage_multi_reward():
         agents=agents,
         reward_funcs=reward_funcs,
         reward_weights=reward_weights,
-        reward_processors=reward_processors,
+        reward_processors=None,
         args=config,
         train_dataset=train_dataset,
         tokenizer=tokenizer,
