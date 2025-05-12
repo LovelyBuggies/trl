@@ -5,8 +5,21 @@ from nltk.sentiment import SentimentIntensityAnalyzer
 from nltk.tokenize import sent_tokenize, word_tokenize
 
 # Ensure necessary NLTK packages are downloaded
-nltk.download('vader_lexicon')
-nltk.download('punkt')
+# This will properly download and install NLTK data resources
+def ensure_nltk_resources():
+    """Download required NLTK resources if they're not already available."""
+    resources = ['punkt', 'vader_lexicon']
+    for resource in resources:
+        try:
+            nltk.data.find(f'tokenizers/{resource}')
+            print(f"NLTK resource '{resource}' is already available.")
+        except LookupError:
+            print(f"Downloading NLTK resource '{resource}'...")
+            nltk.download(resource)
+            print(f"NLTK resource '{resource}' has been downloaded.")
+
+# Call this function at import time to ensure resources are available
+ensure_nltk_resources()
 
 # Stopwords set for vocabulary analysis
 STOPWORDS = set([
