@@ -5,15 +5,8 @@ from nltk.sentiment import SentimentIntensityAnalyzer
 from nltk.tokenize import sent_tokenize, word_tokenize
 
 # Ensure necessary NLTK packages are downloaded
-try:
-    nltk.data.find('vader_lexicon')
-except LookupError:
-    nltk.download('vader_lexicon')
-
-try:
-    nltk.data.find('punkt')
-except LookupError:
-    nltk.download('punkt')
+nltk.download('vader_lexicon')
+nltk.download('punkt')
 
 # Stopwords set for vocabulary analysis
 STOPWORDS = set([
