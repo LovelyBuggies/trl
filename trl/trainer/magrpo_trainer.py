@@ -1182,13 +1182,8 @@ def example_usage_multi_reward():
     # Set up reward functions with weights
     reward_funcs = [
         sentiment_contrast_reward,
-        question_generation_reward,
     ]
-    reward_weights = [0.0, 1.0]
-    reward_processors = [
-        None,
-        None,
-    ]
+    reward_weights = [1.0]
 
     # Configure LoRA
     lora_config = LoraConfig(
@@ -1206,9 +1201,9 @@ def example_usage_multi_reward():
     agents = []
     for _ in range(2):
         base_model = AutoModelForCausalLM.from_pretrained(model_name)
-        lora_model = get_peft_model(base_model, lora_config)
-        lora_model.print_trainable_parameters()
-        # lora_model = base_model
+        # lora_model = get_peft_model(base_model, lora_config)
+        # lora_model.print_trainable_parameters()
+        lora_model = base_model
         agents.append(lora_model)
 
     # Initialize trainer with multiple reward functions
