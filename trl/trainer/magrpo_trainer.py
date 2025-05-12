@@ -671,23 +671,28 @@ class MAGRPOTrainer:
 
     def _log_completion_metrics(self, completion1, completion2):
         """Log detailed metrics about a pair of completions to wandb."""
-        len1 = len(completion1)
-        len2 = len(completion2)
 
-        log_data = {
-            "agent1_completion_length": len1,
-            "agent2_completion_length": len2,
-            "max_min_len_ratio": max(len1, len2) / min(len1, len2) if min(len1, len2) > 0 else max(len1, len2),
-            "agent_2_1_len_ratio": len2 / len1 if len1 > 0 else len2,
-        }
+        calculate_len_ratio = None
+        for func in self.reward_funcs:
+            if hasattr(func, '__name__') and func.__name__ == 'proper_length_ratio_reward':
+                calculate_len_ratio = True
+                break
 
-        # Add TTR metrics if available
-        # This assumes vocabulary_richness_reward might be one of our functions
         calculate_ttr = None
         for func in self.reward_funcs:
             if hasattr(func, '__name__') and func.__name__ == 'vocabulary_richness_reward':
                 calculate_ttr = getattr(func, 'calculate_ttr', None)
                 break
+
+        log_data = {}
+        if calculate_len_ratio:
+            len1 = len(completion1)
+            len2 = len(completion2)
+            log_data.update({
+                "agent1_completion_length": len1,
+                "agent2_completion_length": len2,
+                "agents_len_ratio": len2 / len1 if len1 > 0 else len2,
+            })
 
         if calculate_ttr:
             ttr1 = calculate_ttr(completion1, STOPWORDS)
@@ -1179,7 +1184,7 @@ def example_usage_multi_reward():
         sentiment_contrast_reward,
         question_generation_reward,
     ]
-    reward_weights = [0.3, 0.7]
+    reward_weights = [0.0, 1.7]
     reward_processors = [
         None,
         None,
@@ -1202,7 +1207,7 @@ def example_usage_multi_reward():
     for _ in range(2):
         base_model = AutoModelForCausalLM.from_pretrained(model_name)
         lora_model = get_peft_model(base_model, lora_config)
-        agents.append(lora_model)
+        agents.append(base_model)
 
     # Initialize trainer with multiple reward functions
     trainer = MAGRPOTrainer(
