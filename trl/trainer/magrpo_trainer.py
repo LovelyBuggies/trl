@@ -13,151 +13,11 @@ import numpy as np
 import logging
 import os
 import wandb
+from trl import STOPWORDS, vocabulary_richness_reward, proper_length_ratio_reward, \
+        sentiment_contrast_reward, syntax_complexity_reward, readability_contrast_reward, question_generation_reward, \
+        fact_density_reward, coherence_reward, summarization_reward
 
 RewardFunc = Union[str, PreTrainedModel, Callable[[List[str], List[str]], List[float]]]
-
-
-STOPWORDS = set([
-        "a", "an", "the", "and", "but", "or", "if", "because", "as", "what",
-        "which", "this", "that", "these", "those", "then", "just", "so", "than",
-        "such", "when", "who", "how", "where", "why", "is", "am", "are", "was",
-        "were", "be", "been", "being", "have", "has", "had", "having", "do", "does",
-        "did", "doing", "to", "for", "with", "about", "against", "between", "into",
-        "through", "during", "before", "after", "above", "below", "from", "up",
-        "down", "in", "out", "on", "off", "over", "under", "again", "further",
-        "then", "once", "here", "there", "all", "any", "both", "each", "few",
-        "more", "most", "other", "some", "such", "no", "nor", "not", "only", "own",
-        "same", "so", "than", "too", "very", "can", "will", "should", "now", "of"
-    ])
-
-
-def length_ratio_reward(completions1, completions2):
-    """Example reward function that rewards based on length ratio between agent outputs"""
-    rewards = []
-    for c1, c2 in zip(completions1, completions2):
-        len1, len2 = len(c1), len(c2)
-        # Reward based on the ratio of lengths
-        ratio = max(len1, len2) / min(len1, len2) if min(len1, len2) > 0 else max(len1, len2)
-        rewards.append(float(ratio))
-    return rewards
-
-
-def proper_length_ratio_reward(completions1, completions2):
-    """Reward function that gives high reward when the second completion is 2-3 times longer than the first.
-
-    The maximum reward is given when the ratio is exactly in the target range (2-3x),
-    and gradually decreases as the ratio moves further from this range.
-    """
-    rewards = []
-    for c1, c2 in zip(completions1, completions2):
-        len1, len2 = len(c1), len(c2)
-
-        # Ensure we don't divide by zero
-        if len1 == 0:
-            rewards.append(0.0)  # No reward for empty first completion
-            continue
-
-        # Calculate the ratio of second to first completion
-        ratio = len2 / len1
-
-        # Define target range and calculate reward
-        target_min = 2.0
-        target_max = 3.0
-
-        if target_min <= ratio <= target_max:
-            # Maximum reward (1.0) when within the target range
-            reward = 1.0
-        else:
-            # Calculate distance from the nearest boundary of the target range
-            if ratio < target_min:
-                distance = target_min - ratio
-            else:  # ratio > target_max
-                distance = ratio - target_max
-
-            # Reward decreases as distance increases
-            # Using an exponential decay function: reward = e^(-distance)
-            import math
-            reward = math.exp(-distance)
-
-        rewards.append(float(reward))
-
-    return rewards
-
-
-def vocabulary_richness_reward(completions1, completions2):
-    """Reward function that gives high reward when the second completion has higher
-    vocabulary richness (Type-Token Ratio without stopwords) than the first.
-
-    The reward is based on the improvement in TTR from the first to the second completion.
-    Maximum reward is given when the second completion's TTR is substantially higher,
-    and gradually decreases as the improvement diminishes.
-    """
-    import math
-
-    def calculate_ttr(text, stopwords):
-        """Calculate Type-Token Ratio (TTR) excluding stopwords.
-
-        Args:
-            text: String text to analyze
-            stopwords: Set of stopwords to exclude
-
-        Returns:
-            Float value representing TTR (unique content words / total content words)
-        """
-        import re
-
-        # Tokenize by splitting on non-alphanumeric characters and convert to lowercase
-        words = re.findall(r'\b\w+\b', text.lower())
-
-        # Filter out stopwords
-        if stopwords:
-            content_words = [word for word in words if word not in stopwords]
-        else:
-            content_words = words
-
-        # Calculate TTR (unique words / total words)
-        if not content_words:
-            return 0.0
-
-        types = len(set(content_words))
-        tokens = len(content_words)
-
-        return types / tokens if tokens > 0 else 0.0
-
-    vocabulary_richness_reward.calculate_ttr = calculate_ttr
-    rewards = []
-    for c1, c2 in zip(completions1, completions2):
-        # Calculate TTR for both completions
-        ttr1 = calculate_ttr(c1, STOPWORDS)
-        ttr2 = calculate_ttr(c2, STOPWORDS)
-
-        # Handle edge cases
-        if ttr1 == 0:
-            if ttr2 > 0:
-                reward = 1.0  # Maximum reward if improvement from zero
-            else:
-                reward = 0.0  # No reward if both are zero
-        else:
-            # Calculate improvement ratio
-            improvement = ttr2 / ttr1
-
-            # Define target range for improvement
-            target_min = 1.2  # At least 20% improvement
-            target_max = 2.0  # Up to double the vocabulary richness
-
-            if improvement >= target_max:
-                reward = 1.0  # Maximum reward
-            elif improvement >= target_min:
-                # Linear scaling between min and max targets
-                reward = (improvement - target_min) / (target_max - target_min)
-            else:
-                # Exponential decay for below-target improvement
-                distance = target_min - improvement
-                reward = math.exp(-2 * distance)  # Steeper decay
-
-        rewards.append(float(reward))
-
-    return rewards
 
 
 class MAGRPOTrainer:
@@ -1316,14 +1176,10 @@ def example_usage_multi_reward():
 
     # Set up reward functions with weights
     reward_funcs = [
-        vocabulary_richness_reward,  # Reward based on vocabulary richness
-        proper_length_ratio_reward,  # Reward based on length ratio
+        sentiment_contrast_reward,
+        question_generation_reward,
     ]
-
-    # Higher weight for vocabulary richness (0.3) vs length ratio (0.7)
     reward_weights = [0.3, 0.7]
-
-    # Set up reward processors
     reward_processors = [
         None,
         None,
