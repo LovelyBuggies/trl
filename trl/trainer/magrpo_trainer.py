@@ -1181,7 +1181,7 @@ def example_usage_multi_reward():
 
     # Set up reward functions with weights
     reward_funcs = [
-        syntax_complexity_reward,
+        question_generation_reward,
     ]
     reward_weights = [1.0]
 
